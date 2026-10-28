@@ -160,3 +160,7 @@ follows the kmab dark theme. No database migration or ebook changes are needed.
 ## bulk selection (v1.1)
 
 The library, reading review, series catalog, and individual series reading-order workspace now support multi-selection. Tick items or use **select all shown**, choose a bulk action, then apply. Book actions cover reading statuses, hide/unhide, and unassigning series; series actions support deleting selected series (books and reading history remain). Operations modify SQLite metadata only. Select-all applies to the currently rendered page, not every book matching a search (the library currently shows up to 1,000 results). No separate authentication is added. The reading review includes cached covers where available, with a title fallback.
+
+## v1.2 selection interaction
+
+Bulk-selection checkboxes and the action bar are hidden by default. Right-click (or long-press on touch) a library book, reading-review card, series tile, or series member and choose **select item / select book / select series** to begin selection. Additional items can then be checked; **select all shown** applies to the current list only. A compact action bar is fixed to the bottom of the viewport, and **done** clears the selection and exits selection mode. On keyboards use Shift+F10 to open the context menu of a focused item.

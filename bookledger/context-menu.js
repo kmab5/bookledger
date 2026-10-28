@@ -70,6 +70,11 @@
   function build(node) {
     const { bookId, seriesId, link } = targetInfo(node);
     // Contextual actions always first. Never perform destructive changes without an explicit click.
+    const selectable = node.closest('.bulk-item');
+    if (selectable && document.querySelector(`[data-bulk-toolbar="${selectable.dataset.bulkKind}"]`)) {
+      item('select item', () => window.BookLedgerBulk?.start(selectable));
+      separator();
+    }
     if (bookId) {
       item('open book details', () => visit('/book/' + bookId));
       item('copy book link', () => copy(location.origin + '/book/' + bookId));

@@ -31,3 +31,20 @@
 /* bulk selection and reading cards */
 .bulk-toolbar{position:sticky;top:8px;z-index:30;display:flex;flex-wrap:wrap;align-items:end;gap:12px;background:#202026;border:1px solid #45404e;border-radius:14px;padding:14px 16px;margin:14px 0 22px;box-shadow:0 10px 30px #0004}
 .bulk-toolbar .bulk-select-all{display:flex;align-items:center;gap:9px;margin:0;white-space:nowrap}.bulk-toolbar .bulk-select-all input{width:19px;height:19px;accent-color:#b24bff}.bulk-count{font:700 .82rem 'Space Mono',monospace;color:#c373ff;white-space:nowrap}.bulk-action-label{display:flex;align-items:center;gap:9px;margin:0;min-width:220px;flex:1}.bulk-action-label select{flex:1;min-width:130px}.bulk-toolbar button{margin:0;min-height:44px}.bulk-toolbar button:disabled{opacity:.45;cursor:not-allowed}.bulk-item{position:relative}.bulk-item.is-selected{outline:2px solid #b24bff;outline-offset:2px}.bulk-check{position:absolute;z-index:5;top:10px;left:10px;display:flex;gap:6px;align-items:center;padding:7px 9px;background:#17171bef;border:1px solid #45404e;border-radius:10px;color:#edebe4;font-size:.76rem;cursor:pointer;margin:0}.bulk-check input{width:19px;height:19px;margin:0;accent-color:#b24bff;cursor:pointer}.series-select-item>.series-tile{height:100%}.series-volume.bulk-item{display:block;padding-top:56px}.series-volume-content{display:grid;grid-template-columns:56px minmax(0,1fr) auto;gap:16px;align-items:center}.reading-card{display:grid;grid-template-columns:92px minmax(0,1fr);gap:18px;align-items:start;padding-top:54px}.reading-cover{display:flex;justify-content:center;align-items:center;width:92px;min-height:130px;background:#26222d;border-radius:8px;overflow:hidden}.reading-cover img{width:100%;height:138px;object-fit:cover}.reading-cover .book-cover-placeholder{font-size:.8rem;padding:10px;overflow-wrap:anywhere}.reading-card-info{min-width:0}.reading-card .status-actions{display:flex;flex-wrap:wrap;gap:8px}.reading-card .status-actions button{margin:0;flex:1 1 130px}@media(max-width:750px){.bulk-toolbar{position:static;gap:10px}.bulk-action-label{flex:1 1 100%}.bulk-toolbar button{flex:1}.series-volume-content{grid-template-columns:42px minmax(0,1fr)}.series-volume-content .series-inline-edit{grid-column:2}.reading-card{grid-template-columns:65px minmax(0,1fr);gap:12px}.reading-cover{width:65px;min-height:100px}.reading-cover img{height:103px}}@media(max-width:410px){.reading-card{grid-template-columns:1fr}.reading-cover{width:82px}}
+
+/* v1.2: explicit selection mode; compact anchored bottom action bar */
+.bulk-toolbar[hidden],.bulk-check[hidden]{display:none!important}
+body:not(.bulk-mode) .bulk-check{display:none!important}
+body:not(.bulk-mode) .bulk-item.is-selected{outline:0}
+.bulk-toolbar{position:fixed;top:auto;bottom:max(12px,env(safe-area-inset-bottom));left:50%;transform:translateX(-50%);z-index:1100;width:min(740px,calc(100vw - 24px));margin:0;display:flex;align-items:center;justify-content:center;flex-wrap:wrap;gap:8px;padding:10px 12px;border-radius:14px;box-shadow:0 15px 55px #000a}
+.bulk-toolbar .bulk-action-label{flex:1 1 190px;min-width:170px;font-size:.8rem}
+.bulk-toolbar .bulk-action-label select{min-width:120px;padding:7px 10px;font-size:.86rem}
+.bulk-toolbar .bulk-select-all{font-size:.78rem;gap:6px}
+.bulk-toolbar .bulk-select-all input{width:16px;height:16px}
+.bulk-toolbar button{min-height:36px;padding:7px 11px;font-size:.8rem;flex:0 0 auto}
+.bulk-count{font-size:.76rem}
+body.bulk-mode main{padding-bottom:120px}
+body:not(.bulk-mode) .series-volume.bulk-item{padding-top:0}
+body:not(.bulk-mode) .reading-card.bulk-item{padding-top:18px}
+@media(max-width:750px){.bulk-toolbar{position:fixed;bottom:max(8px,env(safe-area-inset-bottom));left:50%;gap:7px;padding:9px;width:calc(100vw - 16px)}.bulk-toolbar .bulk-action-label{flex:1 1 150px;min-width:130px}.bulk-toolbar button{flex:0 0 auto}.bulk-toolbar .bulk-select-all{flex:0 0 auto}body.bulk-mode main{padding-bottom:170px}}
+@media(max-width:440px){.bulk-toolbar .bulk-action-label{flex:1 1 100%}.bulk-toolbar .bulk-action-label select{flex:1}.bulk-toolbar{justify-content:space-between}}
