@@ -15,7 +15,15 @@ def h(s):return html.escape(str(s if s is not None else ''),quote=True)
 def layout(title,body):
     links=[('/', 'library'),('/scan','scan'),('/review','review'),('/reading','reading'),('/quick-sort','quick sort'),('/series','series'),('/duplicates','editions'),('/stats','statistics'),('/enrich','enrich'),('/exports','exports')]
     nav=''.join(f'<a href="{url}">{label}</a>' for url,label in links)
-    return HTMLResponse(f'''<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="theme-color" content="#0E0E11"><meta name="bookledger-csrf" content="{h(GLOBAL_CSRF)}"><link rel="icon" type="image/svg+xml" href="/favicon.svg"><title>{h(title).lower()} · bookledger</title><style>{CSS}</style></head><body><a class="skip-link" href="#main-content">skip to content</a><header><a href="/"><strong>bookledger</strong></a><nav>{nav}</nav></header><main id="main-content">{body}</main><script src="/series-menu.js" defer></script><script src="/context-menu.js" defer></script></body></html>''')
+    return HTMLResponse(f'''<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="theme-color" content="#0E0E11"><meta name="bookledger-csrf" content="{h(GLOBAL_CSRF)}"><link rel="icon" type="image/svg+xml" href="/favicon.svg"><title>{h(title).lower()} · bookledger</title><style>{CSS}</style></head><body><a class="skip-link" href="#main-content">skip to content</a><header><a href="/"><strong>bookledger</strong></a><nav>{nav}</nav></header><main id="main-content">{body}</main><script src="/series-menu.js" defer></script><script src="/context-menu.js" defer></script><script src="/bulk.js" defer></script></body></html>''')
+def bulk_toolbar(kind):
+    if kind=='series':
+        choices='<option value="delete">delete selected series (books stay)</option>'
+    else:
+        choices=''.join(f'<option value="{x}">{h(LABELS[x])}</option>' for x in ('finished','reading','not_read','want_to_read','on_hold','abandoned','rereading'))
+        choices+='<option value="hide">hide selected</option><option value="unhide">unhide selected</option><option value="unassign_series">remove from series</option>'
+    return f'<form class="bulk-toolbar" data-bulk-toolbar="{kind}" method="post" action="/bulk/{"series" if kind=="series" else "books"}"><input type="hidden" name="csrf" value="{h(GLOBAL_CSRF)}"><label class="bulk-select-all"><input type="checkbox" data-bulk-all> select all shown</label><output aria-live="polite" class="bulk-count">0 selected</output><label class="bulk-action-label">bulk action <select name="action" required><option value="">choose action…</option>{choices}</select></label><button type="submit" disabled>apply to selection</button><button type="button" class="ghost" data-bulk-clear>clear</button><span data-bulk-inputs></span></form>'
+
 def safe_date(v):
     if not v: return None
     from datetime import date
@@ -31,6 +39,9 @@ def create_app(db_path):
     @app.get('/context-menu.js')
     def general_context_menu_script():
         return FileResponse(Path(__file__).with_name('context-menu.js'),media_type='text/javascript',headers={'Cache-Control':'no-cache'})
+    @app.get('/bulk.js')
+    def bulk_script():
+        return FileResponse(Path(__file__).with_name('bulk.js'),media_type='text/javascript')
     @app.get('/favicon.svg')
     def favicon(): return FileResponse(Path(__file__).with_name('favicon.svg'),media_type='image/svg+xml')
     @app.get('/cover/{book_id}')
@@ -68,7 +79,7 @@ def create_app(db_path):
         const esc=x=>String(x??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
         async function refresh(){try{const r=await fetch('/scan/status',{cache:'no-store'});if(!r.ok)throw Error('Status request failed');const j=await r.json();
         if(j.status==='idle'){target.textContent='No scan started yet.';return}
-        const counts=j.counts||{};const lines=(j.events||[]).map(e=>esc(e)).join('\n');
+        const counts=j.counts||{};const lines=(j.events||[]).map(e=>esc(e)).join('\\n');
         target.innerHTML='<p><strong>'+esc(j.status)+'</strong> · '+esc(j.folder)+'</p><p>'+esc(j.processed||0)+' files encountered · '+esc(counts.new||0)+' new · '+esc(counts.updated||0)+' updated · '+esc(counts.unchanged||0)+' unchanged · '+esc(counts.errors||0)+' errors</p><p>Current: '+esc(j.current||'—')+'</p><p>Stage: '+esc(j.stage||'—')+'</p>'+(j.error?'<p>'+esc(j.error)+'</p>':'')+'<pre id="scan-log" role="log" aria-label="scan event log" style="max-height:350px;overflow:auto">'+lines+'</pre>';const log=document.getElementById('scan-log');if(log)log.scrollTop=log.scrollHeight;
         }catch(e){target.textContent=e.message}}
         refresh();setInterval(refresh,1500);
@@ -195,8 +206,50 @@ async function poll(){{try{{const r=await fetch('/enrich/status',{{cache:'no-sto
             count=c.execute('SELECT COUNT(*) FROM books').fetchone()[0]; pending=c.execute('SELECT COUNT(*) FROM review_queue WHERE resolved=0').fetchone()[0]
         options=lambda opts,current:''.join(f'<option value="{h(v)}" {"selected" if v==current else ""}>{h(n)}</option>' for v,n in opts)
         filters=f'<form method="get" class="panel toolbar"><input name="q" placeholder="Title, author or series" value="{h(q)}"><select name="status">{options([("","Any reading status")]+[(x,LABELS[x]) for x in STATES],status)}</select><select name="category">{options([("","Any category")]+[(x,x) for x in categories],category)}</select><select name="series">{options([("","Any series")]+[(x,x) for x in series_names],series)}</select><select name="visibility" aria-label="Book visibility">{options([("visible","Visible books"),("hidden","Hidden books only"),("all","All books")],visibility)}</select><select name="sort">{options([("title","Title"),("author","Author"),("date","Recently indexed"),("series","Series order")],sort)}</select><button>Filter</button></form>'
-        cards=''.join(f'<article class="panel book-card"><a href="/book/{b["id"]}">'+(f'<img class="book-cover" loading="lazy" src="/cover/{b["id"]}" alt="cover of {h(b["title"])}">' if b['cover_path'] else f'<div class="book-cover-placeholder">{h(b["title"])}</div>')+f'</a><div class="book-info"><a href="/book/{b["id"]}"><strong>{h(b["title"])}</strong></a><p>{h(", ".join(jsonarr(b["authors"])))}</p><p>{h(b["series"] or "")}{" · #"+h(b["series_index"]) if b["series_index"] is not None else ""}</p><span class="tag">{h(LABELS.get(b["status"],"Not answered"))}</span>{"<span class=badge>review</span>" if b["needs_review"] else ""}</div></article>' for b in rows)
-        return layout('Library',f'<div class=section-head>your catalog / overview</div><h1>your library<span style="color:var(--primary)">.</span></h1><div class=stat-strip><div class=stat-chip><b>{count:,}</b> titles</div><div class=stat-chip><b>{pending:,}</b> suggestions</div><div class=stat-chip><b>{len(rows):,}</b> shown</div></div>{filters}<section class="grid">{cards or "<p>No books found. Run bookledger scan first.</p>"}</section>')
+        cards=''.join(f'<article class="panel book-card bulk-item" data-bulk-kind="book"><label class="bulk-check" aria-label="select book {h(b["title"])}"><input type="checkbox" class="bulk-select" value="{b["id"]}"><span>select</span></label><a href="/book/{b["id"]}">'+(f'<img class="book-cover" loading="lazy" src="/cover/{b["id"]}" alt="cover of {h(b["title"])}">' if b['cover_path'] else f'<div class="book-cover-placeholder">{h(b["title"])}</div>')+f'</a><div class="book-info"><a href="/book/{b["id"]}"><strong>{h(b["title"])}</strong></a><p>{h(", ".join(jsonarr(b["authors"])))}</p><p>{h(b["series"] or "")}{" · #"+h(b["series_index"]) if b["series_index"] is not None else ""}</p><span class="tag">{h(LABELS.get(b["status"],"Not answered"))}</span>{"<span class=badge>review</span>" if b["needs_review"] else ""}</div></article>' for b in rows)
+        return layout('Library',f'<div class=section-head>your catalog / overview</div><h1>your library<span style="color:var(--primary)">.</span></h1><div class=stat-strip><div class=stat-chip><b>{count:,}</b> titles</div><div class=stat-chip><b>{pending:,}</b> suggestions</div><div class=stat-chip><b>{len(rows):,}</b> shown</div></div>{filters}{bulk_toolbar('book')}<section class="grid bulk-scope">{cards or "<p>No books found. Run bookledger scan first.</p>"}</section>')
+    @app.post('/bulk/books')
+    async def bulk_books(request:Request):
+        form=await request.form();guard(str(form.get('csrf','')))
+        action=str(form.get('action',''))
+        ids=list(dict.fromkeys(int(v) for v in form.getlist('ids') if str(v).isdigit() and int(v)>0))
+        if not ids or len(ids)>1000:raise HTTPException(422,'Select 1–1000 books')
+        if action not in ('finished','reading','not_read','want_to_read','on_hold','abandoned','rereading','hide','unhide','unassign_series'):
+            raise HTTPException(422,'Invalid bulk action')
+        placeholders=','.join('?' for _ in ids)
+        with db() as c:
+            found=c.execute(f'SELECT id FROM books WHERE id IN ({placeholders})',ids).fetchall()
+            if len(found)!=len(ids):raise HTTPException(422,'Some selected books no longer exist')
+            if action in STATES:
+                c.execute(f'UPDATE reading SET status=?,updated_at=? WHERE book_id IN ({placeholders})',(action,now(),*ids))
+                c.execute(f'INSERT INTO reading(book_id,status,updated_at) SELECT id,?,? FROM books WHERE id IN ({placeholders}) AND id NOT IN (SELECT book_id FROM reading)',(action,now(),*ids))
+            elif action in ('hide','unhide'):
+                c.execute(f'UPDATE books SET hidden=?,updated_at=? WHERE id IN ({placeholders})',(int(action=='hide'),now(),*ids))
+            else:
+                c.execute(f'UPDATE books SET series=NULL,series_index=NULL,manually_verified=1,updated_at=? WHERE id IN ({placeholders})',(now(),*ids))
+            c.commit()
+        referer=request.headers.get('referer','')
+        from urllib.parse import urlparse
+        parsed=urlparse(referer)
+        destination=parsed.path + ('?'+parsed.query if parsed.query else '') if parsed.path.startswith('/') and not parsed.path.startswith('//') else '/'
+        return go(destination)
+
+    @app.post('/bulk/series')
+    async def bulk_series(request:Request):
+        form=await request.form();guard(str(form.get('csrf','')))
+        action=str(form.get('action',''))
+        if action!='delete':raise HTTPException(422,'Invalid series action')
+        ids=list(dict.fromkeys(int(v) for v in form.getlist('ids') if str(v).isdigit() and int(v)>0))
+        if not ids or len(ids)>500:raise HTTPException(422,'Select 1–500 series')
+        with db() as c:
+            names=c.execute(f'SELECT name FROM series_catalog WHERE id IN ({",".join("?" for _ in ids)})',ids).fetchall()
+            if len(names)!=len(ids):raise HTTPException(422,'Some series no longer exist')
+            for row in names:
+                c.execute('UPDATE books SET series=NULL,series_index=NULL,manually_verified=1,updated_at=? WHERE series=? COLLATE NOCASE',(now(),row['name']))
+            c.execute(f'DELETE FROM series_catalog WHERE id IN ({",".join("?" for _ in ids)})',ids)
+            c.commit()
+        return go('/series')
+
     @app.post('/book/{book_id}/visibility')
     def set_visibility(book_id:int,csrf:str=Form(...),hidden:str=Form(...)):
         guard(csrf)
@@ -322,11 +375,11 @@ async function poll(){{try{{const r=await fetch('/enrich/status',{{cache:'no-sto
             if scope=='category' and category:
                 conditions.append('EXISTS(SELECT 1 FROM book_categories bc JOIN categories cat ON cat.id=bc.category_id WHERE bc.book_id=b.id AND cat.name=?)');args.append(category)
             if scope=='series' and series:conditions.append('b.series=?');args.append(series)
-            rows=c.execute(f'SELECT b.id,b.title,b.series,r.status FROM books b JOIN reading r ON b.id=r.book_id WHERE {" AND ".join(conditions)} ORDER BY b.series,b.series_index,b.title LIMIT 30',args).fetchall()
+            rows=c.execute(f'SELECT b.id,b.title,b.series,b.cover_path,r.status FROM books b JOIN reading r ON b.id=r.book_id WHERE {" AND ".join(conditions)} ORDER BY b.series,b.series_index,b.title LIMIT 30',args).fetchall()
         opts=lambda data,current:''.join(f'<option value="{h(x)}" {"selected" if x==current else ""}>{h(x)}</option>' for x in data)
         controls=f'<form method="get" class="panel toolbar"><select name="scope">{opts(["all","category","series"],scope)}</select><select name="category"><option value="">Choose category</option>{opts(categories,category)}</select><select name="series"><option value="">Choose series</option>{opts(series_names,series)}</select><label><input type="checkbox" name="include_answered" value="1" {"checked" if include_answered else ""}> Show answered</label><button>Apply</button></form>'
-        cards=''.join(f'<div class="panel"><a href="/book/{x["id"]}"><b>{h(x["title"])}</b></a><p class="muted">{h(x["series"])} · {h(LABELS.get(x["status"],""))}</p><form method="post" action="/reading/quick/{x["id"]}">{token()}<div class="status-actions">{"".join(f"<button class=status-button name=status value={st}>{h(LABELS[st])}</button>" for st in ("finished","reading","want_to_read","not_read","on_hold","abandoned"))}</div></form></div>' for x in rows)
-        return layout('Reading review',f'<h1>reading review.</h1><p>One click per book. The queue shows up to 30 titles at a time; new entries appear automatically as you classify them. Filter by category or series. Dates, reading time, and notes are on each book page.</p>{controls}{cards or "<p>Nothing left in this selection.</p>"}')
+        cards=''.join(f'<div class="panel reading-card bulk-item" data-bulk-kind="book"><label class="bulk-check"><input aria-label="select {h(x["title"])}" type="checkbox" class="bulk-select" value="{x["id"]}"><span>select</span></label><a class="reading-cover" href="/book/{x["id"]}">'+(f'<img src="/cover/{x["id"]}" loading="lazy" alt="cover of {h(x["title"])}" onerror="this.hidden=true">' if x['cover_path'] else f'<span class="book-cover-placeholder">{h(x["title"])}</span>')+f'</a><div class="reading-card-info"><a href="/book/{x["id"]}"><b>{h(x["title"])}</b></a><p class="muted">{h(x["series"])} · {h(LABELS.get(x["status"],""))}</p><form method="post" action="/reading/quick/{x["id"]}">{token()}<div class="status-actions">{"".join(f"<button class=status-button name=status value={st}>{h(LABELS[st])}</button>" for st in ("finished","reading","want_to_read","not_read","on_hold","abandoned"))}</div></form></div></div>' for x in rows)
+        return layout('Reading review',f'<h1>reading review.</h1><p>One click per book. The queue shows up to 30 titles at a time; new entries appear automatically as you classify them. Filter by category or series. Dates, reading time, and notes are on each book page.</p>{controls}{bulk_toolbar("book")}{cards or "<p>Nothing left in this selection.</p>"}')
     @app.post('/reading/quick/{book_id}')
     def quick(book_id:int,csrf:str=Form(...),status:str=Form(...)):
         guard(csrf)
@@ -383,12 +436,12 @@ async function poll(){{try{{const r=await fetch('/enrich/status',{{cache:'no-sto
         def card(x):
             volumes=covers[x['id']]
             thumbs=''.join(f'<div class="series-cover"><img src="/cover/{bk["id"]}" alt="" loading="lazy" onerror="this.hidden=true"><span>{h(bk["title"])}</span></div>' for bk in volumes)
-            return f'''<a class="series-tile" data-menu="series" data-series-id="{x['id']}" href="/series/{x['id']}"><div class="series-stack">{thumbs or '<div class="series-empty">no books yet</div>'}</div><div class="series-tile-body"><div class="series-tile-title">{h(x['name'])}</div><div class="series-tile-meta">{x['total']} books <span aria-hidden="true">·</span> {x['completed'] or 0} finished</div><div class="series-progress" role="progressbar" aria-label="reading progress" aria-valuenow="{x['completed'] or 0}" aria-valuemin="0" aria-valuemax="{max(x['total'],1)}"><span style="width:{100*(x['completed'] or 0)/max(x['total'],1):.1f}%"></span></div>{'<div class="series-warning">order needs review</div>' if x['unordered'] else ''}</div></a>'''
+            return f'''<div class="bulk-item series-select-item" data-bulk-kind="series"><label class="bulk-check"><input type="checkbox" class="bulk-select" value="{x['id']}" aria-label="select series {h(x['name'])}"><span>select</span></label><a class="series-tile" data-menu="series" data-series-id="{x['id']}" href="/series/{x['id']}"><div class="series-stack">{thumbs or '<div class="series-empty">no books yet</div>'}</div><div class="series-tile-body"><div class="series-tile-title">{h(x['name'])}</div><div class="series-tile-meta">{x['total']} books <span aria-hidden="true">·</span> {x['completed'] or 0} finished</div><div class="series-progress" role="progressbar" aria-label="reading progress" aria-valuenow="{x['completed'] or 0}" aria-valuemin="0" aria-valuemax="{max(x['total'],1)}"><span style="width:{100*(x['completed'] or 0)/max(x['total'],1):.1f}%"></span></div>{'<div class="series-warning">order needs review</div>' if x['unordered'] else ''}</div></a></div>'''
         def opt(v,t,current):return f'<option value="{h(v)}" {"selected" if v==current else ""}>{h(t)}</option>'
         controls=f'''<form method="get" class="series-controls"><label>find a series<input name="q" value="{h(q)}" placeholder="search series…"></label><label>show<select name="state">{''.join(opt(v,t,state) for v,t in [('all','all series'),('in_progress','currently reading'),('complete','completed'),('unread','none finished'),('needs_order','missing volume order')])}</select></label><label>sort<select name="sort">{''.join(opt(v,t,sort) for v,t in [('name','name'),('size','most books'),('progress','most read')])}</select></label><button>apply</button></form>'''
         summary=f'<div class="series-summary"><div><strong>{len(rows)}</strong><span>series</span></div><div><strong>{sum(x["total"] for x in rows)}</strong><span>assigned books</span></div><div><strong>{sum(bool(x["unordered"]) for x in rows)}</strong><span>need ordering</span></div></div>'
         create=f'<details class="series-create"><summary>+ create a series</summary><form method="post" action="/series/new">{token()}<label>series name<input name="name" maxlength="250" required placeholder="new series name"></label><button>create series</button></form></details>'
-        return layout('series',f'<div class="series-head"><div><div class="section-head">library / collections</div><h1>your series.</h1><p class="muted">Browse your collections; open one to arrange books, correct volumes, and manage membership.</p></div>{create}</div>{summary}{controls}<div class="series-grid">{"".join(card(x) for x in entries) or "<p>No series match these filters.</p>"}</div>')
+        return layout('series',f'<div class="series-head"><div><div class="section-head">library / collections</div><h1>your series.</h1><p class="muted">Browse your collections; open one to arrange books, correct volumes, and manage membership.</p></div>{create}</div>{summary}{controls}{bulk_toolbar("series")}<div class="series-grid">{"".join(card(x) for x in entries) or "<p>No series match these filters.</p>"}</div>')
 
     @app.get('/series/{series_id}',response_class=HTMLResponse)
     def series_detail(series_id:int,q:str=''):
@@ -401,11 +454,11 @@ async function poll(){{try{{const r=await fetch('/enrich/status',{{cache:'no-sto
         count=len(members);done=sum(x['status']=='finished' for x in members)
         def row(b):
             status=LABELS.get(b['status'],'not answered')
-            return f'''<div class="series-volume" data-menu="book" data-book-id="{b['id']}" data-series-id="{series_id}"><a href="/book/{b['id']}" class="series-volume-cover"><img src="/cover/{b['id']}" loading="lazy" alt="cover of {h(b['title'])}" onerror="this.style.display='none'"></a><div class="series-volume-info"><a href="/book/{b['id']}"><strong>{h(b['title'])}</strong></a><span>{h(', '.join(jsonarr(b['authors'])))} · {h(status)}</span></div><form method="post" action="/series/{series_id}/member/{b['id']}" class="series-inline-edit">{token()}<label>volume<input type="number" step="any" min="0" name="index" value="{h(b['series_index'])}" aria-label="volume number for {h(b['title'])}"></label><button name="action" value="save">save</button><button class="ghost" name="action" value="remove" aria-label="remove {h(b['title'])} from series">remove</button></form></div>'''
+            return f'''<div class="series-volume bulk-item" data-bulk-kind="book"><label class="bulk-check"><input type="checkbox" class="bulk-select" value="{b['id']}" aria-label="select {h(b['title'])}"><span>select</span></label><div class="series-volume-content" data-menu="book" data-book-id="{b['id']}" data-series-id="{series_id}"><a href="/book/{b['id']}" class="series-volume-cover"><img src="/cover/{b['id']}" loading="lazy" alt="cover of {h(b['title'])}" onerror="this.style.display='none'"></a><div class="series-volume-info"><a href="/book/{b['id']}"><strong>{h(b['title'])}</strong></a><span>{h(', '.join(jsonarr(b['authors'])))} · {h(status)}</span></div><form method="post" action="/series/{series_id}/member/{b['id']}" class="series-inline-edit">{token()}<label>volume<input type="number" step="any" min="0" name="index" value="{h(b['series_index'])}" aria-label="volume number for {h(b['title'])}"></label><button name="action" value="save">save</button><button class="ghost" name="action" value="remove" aria-label="remove {h(b['title'])} from series">remove</button></form></div></div>'''
         def add_row(b):return f'<form class="series-candidate" data-menu="candidate" data-book-id="{b["id"]}" data-series-id="{series_id}" method="post" action="/series/{series_id}/member/{b["id"]}">{token()}<div><strong>{h(b["title"])}</strong><span>{h(", ".join(jsonarr(b["authors"])))}</span></div><input type="hidden" name="index" value=""><button name="action" value="add">+ add</button></form>'
         edit=f'''<details id="series-settings" class="series-settings"><summary>series settings</summary><form method="post" action="/series/{series_id}">{token()}<label>series name<input name="name" maxlength="250" required value="{h(item['name'])}"></label><label>description<textarea name="description" rows="3">{h(item['description'] or '')}</textarea></label><label>private notes<textarea name="notes" rows="3">{h(item['notes'] or '')}</textarea></label><button>save details</button></form><form method="post" action="/series/{series_id}/delete" onsubmit="return confirm('Delete this series? Books will be kept and unassigned.');">{token()}<button class="danger" type="submit">delete series</button></form></details>'''
         candidates=f'''<section class="series-side-panel"><h2>add books</h2><p class="muted">Search your whole library, or choose one of the possible matches below. Nothing is assigned automatically.</p><form method="get" action="/series/{series_id}"><label>find by title<input name="q" value="{h(q)}" placeholder="search a title…"></label><button>search library</button></form><div class="series-candidates">{''.join(add_row(b) for b in searches or unassigned) or '<p class="muted">No candidates found.</p>'}</div></section>'''
-        return layout(item['name'],f'''<div class="series-breadcrumb"><a href="/series">← all series</a></div><div class="series-detail-head"><div><div class="section-head">series / organize</div><h1>{h(item['name'])}</h1><p class="muted">{count} books · {done} finished · {count-done} remaining</p></div>{edit}</div><div class="series-workspace"><section class="series-main"><div class="series-section-top"><div><h2>reading order</h2><p class="muted">Set the volume number to organize your collection. Changes save per book.</p></div></div><div class="series-volumes">{''.join(row(b) for b in members) or '<div class="series-empty-state">No books assigned yet. Add books from the right.</div>'}</div></section>{candidates}</div>''')
+        return layout(item['name'],f'''<div class="series-breadcrumb"><a href="/series">← all series</a></div><div class="series-detail-head"><div><div class="section-head">series / organize</div><h1>{h(item['name'])}</h1><p class="muted">{count} books · {done} finished · {count-done} remaining</p></div>{edit}</div><div class="series-workspace"><section class="series-main"><div class="series-section-top"><div><h2>reading order</h2><p class="muted">Set the volume number to organize your collection. Changes save per book.</p></div></div>{bulk_toolbar("book")}<div class="series-volumes">{''.join(row(b) for b in members) or '<div class="series-empty-state">No books assigned yet. Add books from the right.</div>'}</div></section>{candidates}</div>''')
 
     @app.post('/series/{series_id}/member/{book_id}')
     def update_member(series_id:int,book_id:int,csrf:str=Form(...),action:str=Form(...),index:str=Form('')):

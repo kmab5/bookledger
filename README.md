@@ -156,3 +156,7 @@ existing specialized edit/remove/delete menus.
 The menu avoids editable form controls so native text selection and editing remain
 available. The action menu is keyboard navigable (Up/Down/Home/End, Escape) and
 follows the kmab dark theme. No database migration or ebook changes are needed.
+
+## bulk selection (v1.1)
+
+The library, reading review, series catalog, and individual series reading-order workspace now support multi-selection. Tick items or use **select all shown**, choose a bulk action, then apply. Book actions cover reading statuses, hide/unhide, and unassigning series; series actions support deleting selected series (books and reading history remain). Operations modify SQLite metadata only. Select-all applies to the currently rendered page, not every book matching a search (the library currently shows up to 1,000 results). No separate authentication is added. The reading review includes cached covers where available, with a title fallback.
