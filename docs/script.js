@@ -1,0 +1,2 @@
+const button=document.querySelector('.copy');
+button?.addEventListener('click',async()=>{const commands='git clone https://github.com/kmab5/bookledger.git\ncd bookledger\npython -m pip install -e .\nbookledger scan-folder ~/Books\nbookledger serve';try{await navigator.clipboard.writeText(commands);button.textContent='copied ✓';setTimeout(()=>button.textContent='copy commands',1800)}catch{button.textContent='select commands above'}});
