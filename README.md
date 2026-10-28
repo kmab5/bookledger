@@ -99,3 +99,19 @@ this interface intentionally has no file upload or arbitrary file manipulation.
 - No authentication, no AI and no ebook moving/renaming/deletion.
 
 The GitHub Pages landing page is separate from the local FastAPI app. GitHub Pages cannot host the scanner/database server.
+
+
+## v0.5 maintenance and reading workflow
+
+- Enrichment no longer stops on missing SQLite columns (the cause of `No item with that key`). Each book failure is recorded and the batch continues.
+- Scan records extractor versions and automatically refreshes unchanged files once after an extraction upgrade. No original files are modified.
+- Folder hierarchy is persisted in `folder_categories`, separately from the inferred genres and series.
+- Book detail pages now show source folders, possible editions, series siblings, and outstanding review evidence.
+- One-click reading status selection is available on book pages and `/reading`, with a compact queue.
+- Series detail `/series/<id>` supports editing volume order and suggests unassigned titles, while `/book/<id>/series` allows manually assigning/removing memberships.
+- Enhanced dark responsive styles, focus indicators, reduced-motion support and a skip-to-content link.
+- `bookledger review` still starts the same server as `serve`; use the website navigation to review reading or metadata.
+
+Back up the SQLite database before upgrading. The migration adds `files.extractor_version` and a new `folder_categories` table. Existing reading records remain intact.
+
+The series algorithm is still deterministic and intentionally conservative: filename/embedded volume numbers and explicitly named series folders are evidence, not guarantees. Ambiguous cases should be confirmed manually.

@@ -14,7 +14,7 @@ def h(s):return html.escape(str(s if s is not None else ''),quote=True)
 def layout(title,body):
     links=[('/', 'library'),('/scan','scan'),('/review','review'),('/reading','reading'),('/series','series'),('/duplicates','editions'),('/stats','statistics'),('/enrich','enrich'),('/exports','exports')]
     nav=''.join(f'<a href="{url}">{label}</a>' for url,label in links)
-    return HTMLResponse(f'''<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="theme-color" content="#0E0E11"><link rel="icon" type="image/svg+xml" href="/favicon.svg"><title>{h(title).lower()} · bookledger</title><style>{CSS}</style></head><body><header><a href="/"><strong>bookledger</strong></a><nav>{nav}</nav></header><main>{body}</main></body></html>''')
+    return HTMLResponse(f'''<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="theme-color" content="#0E0E11"><link rel="icon" type="image/svg+xml" href="/favicon.svg"><title>{h(title).lower()} · bookledger</title><style>{CSS}</style></head><body><a class="skip-link" href="#main-content">skip to content</a><header><a href="/"><strong>bookledger</strong></a><nav>{nav}</nav></header><main id="main-content">{body}</main></body></html>''')
 def safe_date(v):
     if not v: return None
     from datetime import date
@@ -183,20 +183,41 @@ def create_app(db_path):
         with db() as c:
             b=c.execute('SELECT * FROM books WHERE id=?',(book_id,)).fetchone()
             if not b:raise HTTPException(404)
+            series_names=[x[0] for x in c.execute('SELECT name FROM series_catalog ORDER BY name')]
             r=c.execute('SELECT * FROM reading WHERE book_id=?',(book_id,)).fetchone()
             files=c.execute('SELECT * FROM files WHERE book_id=?',(book_id,)).fetchall()
             cats=c.execute('SELECT c.name,bc.confidence,bc.confirmed FROM book_categories bc JOIN categories c ON c.id=bc.category_id WHERE bc.book_id=?',(book_id,)).fetchall()
             sessions=c.execute('SELECT * FROM reading_sessions WHERE book_id=? ORDER BY id DESC',(book_id,)).fetchall()
+            relations=c.execute('''SELECT l.id,l.kind,l.confidence,l.resolved,other.id AS other_id,other.title AS other_title FROM book_links l JOIN books other ON other.id=CASE WHEN l.book_id=? THEN l.candidate_id ELSE l.book_id END WHERE l.book_id=? OR l.candidate_id=?''',(book_id,book_id,book_id)).fetchall()
+            folders=c.execute('''SELECT DISTINCT fc.folder_path,fc.category,fc.confidence FROM folder_categories fc JOIN files f ON f.id=fc.file_id WHERE f.book_id=? ORDER BY fc.folder_path''',(book_id,)).fetchall()
+            series_members=c.execute('SELECT id,title,series_index FROM books WHERE series=? AND id<>? ORDER BY series_index,title LIMIT 150',(b['series'],book_id)).fetchall() if b['series'] else []
+            pending=c.execute('SELECT id,field,suggested,confidence,reason FROM review_queue WHERE book_id=? AND resolved=0',(book_id,)).fetchall()
         fields=''.join(f'<p><b>{h(key.replace("_"," ").title())}:</b> {h(", ".join(jsonarr(b[key])) if key in ("authors","subjects") else b[key])}</p>' for key in ('isbn13','isbn10','language','publisher','published','description','series','series_index','page_count','page_count_kind','word_count','cover_url') if b[key])
         statusopts=''.join(f'<option value="{s}" {"selected" if r and r["status"]==s else ""}>{LABELS[s]}</option>' for s in STATES)
         def val(k):return h(r[k] if r and r[k] is not None else '')
         reading=f'''<form method="post" action="/book/{book_id}/reading" class="panel">{token()}<h2>Reading record</h2><label>Status<select name="status">{statusopts}</select></label><label>Started<input type="date" name="started" value="{val('started')}"></label><label>Finished<input type="date" name="finished" value="{val('finished')}"></label><label>Time read (minutes)<input type="number" min="0" name="minutes_read" value="{val('minutes_read')}"></label><label>Current page<input type="number" min="0" name="current_page" value="{val('current_page')}"></label><label>Rating (0–5)<input type="number" min="0" max="5" step="0.5" name="rating" value="{val('rating')}"></label><label>Read count<input type="number" min="0" name="read_count" value="{val('read_count')}"></label><label>Notes<textarea name="notes" rows="5">{val('notes')}</textarea></label><button>Save reading record</button></form>'''
         sessionform=f'<form method="post" action="/book/{book_id}/session" class="panel">{token()}<h3>Add reading session</h3><label>Started<input type="date" name="started"></label><label>Finished<input type="date" name="finished"></label><label>Minutes<input type="number" min="0" name="minutes_read"></label><label>Pages read<input type="number" min="0" name="pages_read"></label><label>Note<input name="note"></label><button>Add session</button></form>'
         fileitems=''.join(f'<li>{h(x["path"])} · {x["bytes"]:,} bytes · {h(x["extension"])} {"(unavailable)" if x["missing"] else ""}{" · "+h(x["extract_error"]) if x["extract_error"] else ""}</li>' for x in files)
+        series_form=f'<form class=panel method=post action=/book/{book_id}/series>{token()}<h3>edit series membership</h3><label>Series name<input name=series value="{h(b["series"] or "")}" list=series-options></label><datalist id=series-options>{"".join(f"<option value={h(x[0])}>" for x in series_names)}</datalist><label>Volume number<input name=index type=number step=any min=0 value="{h(b["series_index"])}"></label><button>Save series assignment</button></form>'
         category_form=f'<form method="post" action="/book/{book_id}/category">{token()}<label>Add category/shelf<input name="category" maxlength="80" required></label><button>Add category</button></form>'
         card=f'<section class="panel">{f"<img class=detail-cover src=/cover/{book_id} alt=cover>" if b["cover_path"] else ""}<h1>{h(b["title"])}</h1><p>{h(", ".join(jsonarr(b["authors"])))}</p>{fields}<p>Categories: {" ".join(f"<span class=tag>{h(x[0])} · {int(x[1]*100)}%</span>" for x in cats)}</p>{category_form}<h3>Files (read-only references)</h3><ul>{fileitems}</ul><details><summary>Metadata sources & confidence</summary><pre>{h(json.dumps(json.loads(b["provenance_json"]),indent=2))}</pre><pre>{h(json.dumps(json.loads(b["confidence_json"]),indent=2))}</pre><pre>{h(json.dumps(json.loads(b["metadata_json"]),indent=2))}</pre></details></section>'
         sessions_html=''.join(f'<li>{h(x["started"])} → {h(x["finished"])} · {h(x["minutes_read"])} min · {h(x["note"])}</li>' for x in sessions)
-        return layout(b['title'],f'<div class="split"><div>{card}<section class="panel"><h3>Reading sessions</h3><ul>{sessions_html or "No sessions yet"}</ul></section>{sessionform}</div><div>{reading}</div></div>')
+        related=''.join(f'<li><a href="/book/{x["other_id"]}">{h(x["other_title"])}</a> · {h(x["kind"])} ({round(x["confidence"]*100)}%) · {"resolved" if x["resolved"] else "pending"}</li>' for x in relations)
+        siblings=''.join(f'<li><a href="/book/{x["id"]}">{h(x["title"])}</a> · #{h(x["series_index"])}</li>' for x in series_members)
+        folder_items=''.join(f'<li><code>{h(x["folder_path"])}</code> → {h(x["category"])} ({round(x["confidence"]*100)}%)</li>' for x in folders)
+        pending_items=''.join(f'<li>{h(x["field"])} · {round(x["confidence"]*100)}% · {h(x["reason"])}</li>' for x in pending)
+        quick=''.join(f'<form method="post" action="/book/{book_id}/quick">{token()}<button class="status-button" name="status" value="{st}" aria-label="Mark {h(b["title"])} as {h(LABELS[st])}">{h(LABELS[st])}</button></form>' for st in ("finished","reading","want_to_read","not_read","on_hold","abandoned"))
+        overview=f'<section class="panel"><h2>quick reading status</h2><div class="status-actions">{quick}</div><p class="muted">One click updates your reading status; detailed dates and notes are below.</p></section><section class="panel"><h2>connected records</h2><h3>series</h3><p>{h(b["series"] or "No confirmed series")} · <a href="/series">manage series</a></p><ul>{siblings or "<li>No other volumes indexed</li>"}</ul><h3>possible editions & duplicates</h3><ul>{related or "<li>No matches</li>"}</ul><h3>source folders</h3><ul>{folder_items or "<li>No folder labels yet. Rescan to populate.</li>"}</ul><h3>metadata needing review</h3><ul>{pending_items or "<li>None</li>"}</ul></section>'
+        return layout(b['title'],f'<div class="split"><div>{card}{overview}{series_form}<section class="panel"><h3>Reading sessions</h3><ul>{sessions_html or "No sessions yet"}</ul></section>{sessionform}</div><div>{reading}</div></div>')
+    @app.post('/book/{book_id}/quick')
+    def book_quick(book_id:int,csrf:str=Form(...),status:str=Form(...)):
+        guard(csrf)
+        if status not in STATES or status=='unanswered':raise HTTPException(422)
+        with db() as c:
+            result=c.execute('UPDATE reading SET status=?,updated_at=? WHERE book_id=?',(status,now(),book_id))
+            if not result.rowcount:raise HTTPException(404)
+            c.commit()
+        return go(f'/book/{book_id}')
     @app.post('/book/{book_id}/reading')
     def save_reading(book_id:int,csrf:str=Form(...),status:str=Form(...),started:str=Form(''),finished:str=Form(''),minutes_read:str=Form(''),current_page:str=Form(''),rating:str=Form(''),read_count:str=Form(''),notes:str=Form('')):
         guard(csrf)
@@ -271,11 +292,11 @@ def create_app(db_path):
             if scope=='category' and category:
                 conditions.append('EXISTS(SELECT 1 FROM book_categories bc JOIN categories cat ON cat.id=bc.category_id WHERE bc.book_id=b.id AND cat.name=?)');args.append(category)
             if scope=='series' and series:conditions.append('b.series=?');args.append(series)
-            rows=c.execute(f'SELECT b.id,b.title,b.series,r.status FROM books b JOIN reading r ON b.id=r.book_id WHERE {" AND ".join(conditions)} ORDER BY b.series,b.series_index,b.title LIMIT 200',args).fetchall()
+            rows=c.execute(f'SELECT b.id,b.title,b.series,r.status FROM books b JOIN reading r ON b.id=r.book_id WHERE {" AND ".join(conditions)} ORDER BY b.series,b.series_index,b.title LIMIT 30',args).fetchall()
         opts=lambda data,current:''.join(f'<option value="{h(x)}" {"selected" if x==current else ""}>{h(x)}</option>' for x in data)
         controls=f'<form method="get" class="panel toolbar"><select name="scope">{opts(["all","category","series"],scope)}</select><select name="category"><option value="">Choose category</option>{opts(categories,category)}</select><select name="series"><option value="">Choose series</option>{opts(series_names,series)}</select><label><input type="checkbox" name="include_answered" value="1" {"checked" if include_answered else ""}> Show answered</label><button>Apply</button></form>'
-        cards=''.join(f'<div class="panel"><a href="/book/{x["id"]}"><b>{h(x["title"])}</b></a><p class="muted">{h(x["series"])} · {h(LABELS.get(x["status"],""))}</p><form method="post" action="/reading/quick/{x["id"]}">{token()}<select name="status">{"".join(f"<option value={s}>{LABELS[s]}</option>" for s in STATES if s!="unanswered")}</select><button>Save & next</button></form></div>' for x in rows)
-        return layout('Reading review',f'<h1>Have you read it?</h1><p>Choose all titles, a series, or a category. Detailed dates, time and notes are editable on each book page.</p>{controls}{cards or "<p>Nothing left in this selection.</p>"}')
+        cards=''.join(f'<div class="panel"><a href="/book/{x["id"]}"><b>{h(x["title"])}</b></a><p class="muted">{h(x["series"])} · {h(LABELS.get(x["status"],""))}</p><form method="post" action="/reading/quick/{x["id"]}">{token()}<div class="status-actions">{"".join(f"<button class=status-button name=status value={st}>{h(LABELS[st])}</button>" for st in ("finished","reading","want_to_read","not_read","on_hold","abandoned"))}</div></form></div>' for x in rows)
+        return layout('Reading review',f'<h1>reading review.</h1><p>One click per book. The queue shows up to 30 titles at a time; new entries appear automatically as you classify them. Filter by category or series. Dates, reading time, and notes are on each book page.</p>{controls}{cards or "<p>Nothing left in this selection.</p>"}')
     @app.post('/reading/quick/{book_id}')
     def quick(book_id:int,csrf:str=Form(...),status:str=Form(...)):
         guard(csrf)
@@ -287,8 +308,39 @@ def create_app(db_path):
     def series_index():
         with db() as c:
             rows=c.execute("""SELECT s.*,COUNT(b.id) AS total, SUM(CASE WHEN r.status='finished' THEN 1 ELSE 0 END) AS completed FROM series_catalog s LEFT JOIN books b ON b.series=s.name COLLATE NOCASE LEFT JOIN reading r ON r.book_id=b.id GROUP BY s.id ORDER BY s.name""").fetchall()
-        items=''.join(f'<section class="panel"><h2>{h(x["name"])}</h2><p>{x["total"]} books · {x["completed"] or 0} finished</p><p>{h(x["description"] or "")}</p><p class="muted">{h(x["notes"] or "")}</p><form method="post" action="/series/{x["id"]}">{token()}<label>Name<input name="name" value="{h(x["name"])}" required maxlength="250"></label><label>Description<textarea name="description">{h(x["description"] or "")}</textarea></label><label>Personal notes<textarea name="notes">{h(x["notes"] or "")}</textarea></label><button>Save series</button></form></section>' for x in rows)
-        return layout('Series',f'<h1>Series catalog</h1><p>Renaming a series updates its member books without touching your files.</p>{items or "<p>No series found.</p>"}')
+        items=''.join(f'<section class="panel"><h2><a href="/series/{x["id"]}">{h(x["name"])}</a></h2><p>{x["total"]} books · {x["completed"] or 0} finished</p><p>{h(x["description"] or "")}</p><p class="muted">{h(x["notes"] or "")}</p><form method="post" action="/series/{x["id"]}">{token()}<label>Name<input name="name" value="{h(x["name"])}" required maxlength="250"></label><label>Description<textarea name="description">{h(x["description"] or "")}</textarea></label><label>Personal notes<textarea name="notes">{h(x["notes"] or "")}</textarea></label><button>Save series</button></form></section>' for x in rows)
+        return layout('Series',f'<h1>series catalog</h1><p>Manage series names and memberships. Suggested series are not definitive until you confirm them.</p><section class=panel><h2>create series</h2><form method=post action=/series/new>{token()}<label>Series name<input name=name required maxlength=250></label><button>Create</button></form></section>{items or "<p>No series found.</p>"}')
+    @app.get('/series/{series_id}')
+    def series_detail(series_id:int):
+        with db() as c:
+            item=c.execute('SELECT * FROM series_catalog WHERE id=?',(series_id,)).fetchone()
+            if not item:raise HTTPException(404)
+            members=c.execute('SELECT b.id,b.title,b.series_index,b.authors,r.status FROM books b LEFT JOIN reading r ON r.book_id=b.id WHERE b.series=? COLLATE NOCASE ORDER BY b.series_index IS NULL,b.series_index,b.title',(item['name'],)).fetchall()
+            candidates=c.execute('SELECT b.id,b.title,b.authors FROM books b WHERE b.series IS NULL AND (b.title LIKE ? OR b.authors IN (SELECT authors FROM books WHERE series=? COLLATE NOCASE)) ORDER BY b.title LIMIT 100',(f'%{item["name"]}%',item['name'])).fetchall()
+        rows=''.join(f'<form class="related-card" method="post" action="/book/{b["id"]}/series">{token()}<a href="/book/{b["id"]}"><strong>{h(b["title"])}</strong></a><p class="muted">{h(", ".join(jsonarr(b["authors"])))}</p><input type=hidden name=series value="{h(item["name"])}"><label>volume / reading order<input aria-label="volume number for {h(b["title"])}" name=index type=number step=any min=0 value="{h(b["series_index"])}"></label><button>save volume</button></form>' for b in members)
+        assigned={m['id'] for m in members}
+        possible=''.join(f'<li><a href="/book/{b["id"]}">{h(b["title"])}</a></li>' for b in candidates if b['id'] not in assigned)
+        return layout(item['name'],f'<p><a href="/series">← all series</a></p><h1>{h(item["name"])}</h1><p>{len(members)} volumes · edit memberships from each book page</p><section class="series-collection">{rows or "<p>No volumes assigned yet.</p>"}</section><section class="panel"><h2>unassigned candidates</h2><p class="muted">These are heuristic leads, not automatically included.</p><ul>{possible or "<li>None suggested</li>"}</ul></section>')
+    @app.post('/series/new')
+    def create_series(csrf:str=Form(...),name:str=Form(...)):
+        guard(csrf);name=name.strip()
+        if not name or len(name)>250:raise HTTPException(422)
+        with db() as c:
+            c.execute('INSERT OR IGNORE INTO series_catalog(name,updated_at) VALUES(?,?)',(name,now()));c.commit()
+        return go('/series')
+    @app.post('/book/{book_id}/series')
+    def assign_series(book_id:int,csrf:str=Form(...),series:str=Form(''),index:str=Form('')):
+        guard(csrf);series=series.strip()
+        if len(series)>250:raise HTTPException(422)
+        try:ordinal=float(index) if index.strip() else None
+        except ValueError:raise HTTPException(422,'Invalid series volume')
+        with db() as c:
+            if not c.execute('SELECT 1 FROM books WHERE id=?',(book_id,)).fetchone():raise HTTPException(404)
+            if series:c.execute('INSERT OR IGNORE INTO series_catalog(name,updated_at) VALUES(?,?)',(series,now()))
+            c.execute('UPDATE books SET series=?,series_index=?,updated_at=? WHERE id=?',(series or None,ordinal,now(),book_id))
+            c.execute("UPDATE review_queue SET resolved=1 WHERE book_id=? AND field IN ('series','series_index')",(book_id,))
+            c.commit()
+        return go(f'/book/{book_id}')
     @app.post('/series/{series_id}')
     def update_series(series_id:int,csrf:str=Form(...),name:str=Form(...),description:str=Form(''),notes:str=Form('')):
         guard(csrf);name=name.strip()

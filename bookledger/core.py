@@ -6,6 +6,7 @@ from pathlib import Path
 from difflib import SequenceMatcher
 from xml.etree import ElementTree as ET
 
+EXTRACTOR_VERSION = 6  # Bump when metadata, cover, or classification logic changes.
 FORMATS = {'.epub', '.pdf', '.mobi', '.azw', '.azw3', '.fb2', '.cbz', '.cbr', '.djvu', '.djv', '.txt', '.rtf', '.html', '.htm'}
 SCHEMA = """
 PRAGMA foreign_keys=ON;
@@ -63,6 +64,10 @@ def connect(path: str | Path):
         db.execute('ALTER TABLE files ADD COLUMN content_sha256 TEXT')
     if 'cover_path' not in {row[1] for row in db.execute('PRAGMA table_info(books)')}:
         db.execute('ALTER TABLE books ADD COLUMN cover_path TEXT')
+    if 'extractor_version' not in {row[1] for row in db.execute('PRAGMA table_info(files)')}:
+        db.execute('ALTER TABLE files ADD COLUMN extractor_version INTEGER NOT NULL DEFAULT 0')
+    db.execute('''CREATE TABLE IF NOT EXISTS folder_categories (file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE, folder_path TEXT NOT NULL, category TEXT NOT NULL, confidence REAL NOT NULL, PRIMARY KEY(file_id, folder_path))''')
+    db.execute('CREATE INDEX IF NOT EXISTS idx_folder_categories_name ON folder_categories(category)')
     db.execute('CREATE INDEX IF NOT EXISTS idx_files_sha256 ON files(content_sha256)')
     db.commit()
     return db
@@ -84,6 +89,18 @@ def parse_name(path: Path):
         match = re.search(r'\s*[\[(](.+?)\s*(?:#|book\s+)(\d+(?:\.\d+)?)[\])]\s*$', stem, re.I)
         if match:
             series, idx = clean(match[1]), float(match[2]); stem = stem[:match.start()]
+    if series is None:
+        # Explicit series markers only; a generic parent directory is not proof.
+        for expression in (
+            r'^(?P<title>.+?)\s*\[(?P<series>[^\]]+?)\s*(?:\#|book\s*|vol(?:ume)?\s*)(?P<index>\d+(?:\.\d+)?)\]$',
+            r'^(?P<title>.+?)\s*\((?P<series>[^)]+?),?\s*(?:\#|book\s*|vol(?:ume)?\s*)(?P<index>\d+(?:\.\d+)?)\)$',
+        ):
+            explicit=re.match(expression,stem,re.I)
+            if explicit:
+                series=clean(explicit['series']).rstrip(' ,:-')
+                idx=float(explicit['index'])
+                stem=clean(explicit['title'])
+                break
     parts = re.split(r'\s+[-–]\s+', stem)
     title = clean(parts[0]) if parts else clean(stem)
     author = clean(parts[1]) if len(parts)==2 else ''
@@ -341,7 +358,7 @@ def folder_hints(path, root):
     return [clean(p) for p in parts if norm(p) and p.casefold() not in ignored and not p.startswith('.')]
 
 def enrich_existing(db, progress=None):
-    rows=db.execute('SELECT id,title,authors,isbn10,isbn13,cover_url,cover_path FROM books ORDER BY id').fetchall()
+    rows=db.execute('SELECT * FROM books ORDER BY id').fetchall()
     results={'examined':0,'enriched':0,'covers':0,'errors':0}
     for b in rows:
         results['examined']+=1
@@ -349,7 +366,8 @@ def enrich_existing(db, progress=None):
         try:
             data={'title':b['title'],'authors':jsonarr(b['authors']),'isbn10':b['isbn10'],'isbn13':b['isbn13']}
             online,_=enrich(db,data,True)
-            updates={k:v for k,v in online.items() if k in ('isbn10','isbn13','language','publisher','published','description','subjects','page_count','page_count_kind','cover_url') and v and not b[k] if k in b.keys()}
+            allowed=('isbn10','isbn13','language','publisher','published','description','subjects','page_count','page_count_kind','cover_url')
+            updates={k:v for k,v in online.items() if k in allowed and k in b.keys() and v and not b[k]}
             if updates:
                 if 'subjects' in updates:updates['subjects']=json.dumps(updates['subjects'])
                 db.execute('UPDATE books SET '+','.join(k+'=?' for k in updates)+',updated_at=? WHERE id=?',(*updates.values(),now(),b['id']))
@@ -358,7 +376,10 @@ def enrich_existing(db, progress=None):
             cover=cache_cover(db,b['id'],path=f['path'] if f else None,url=online.get('cover_url') or b['cover_url'])
             if cover:results['covers']+=1
             db.commit()
-        except (OSError,ValueError,sqlite3.Error):results['errors']+=1
+        except Exception as exc:
+            results['errors']+=1
+            if progress: progress({'processed':results['examined'],'total':len(rows),'title':b['title'],'last_error':f'{type(exc).__name__}: {exc}','errors':results['errors']})
+            db.rollback()
     return results
 
 def scan(db, root, online=True, progress=None):
@@ -382,7 +403,7 @@ def scan(db, root, online=True, progress=None):
             try:
                 st=path.stat(); fingerprint=file_fingerprint(path,st)
                 old=db.execute('SELECT * FROM files WHERE path=?',(str(path),)).fetchone()
-                if old and old['fingerprint']==fingerprint:
+                if old and old['fingerprint']==fingerprint and old['extractor_version']==EXTRACTOR_VERSION and (not old['extract_error']):
                     db.execute('UPDATE files SET last_seen=?,missing=0 WHERE id=?',(started,old['id'])); totals['unchanged']+=1; emit('file_done', path=str(path), outcome='unchanged', processed=processed, **totals); continue
                 emit('stage', path=str(path), stage='extracting metadata', processed=processed)
                 guessed=parse_name(path); embedded, raw, err=extract(path)
@@ -394,10 +415,10 @@ def scan(db, root, online=True, progress=None):
                     if series_hint:
                         guessed['series']=re.sub(r'\s*(series|saga|trilogy|cycle)\s*$','',series_hint,flags=re.I).strip() or series_hint
                 emit('stage', path=str(path), stage='computing hash', processed=processed)
-                digest=file_sha256(path)
+                digest=old['content_sha256'] if old and old['fingerprint']==fingerprint and old['content_sha256'] else file_sha256(path)
                 data={**guessed}; sources={k:'filename' for k,v in guessed.items() if v}; scores={k:.55 for k in sources}
                 if guessed.get('series') and raw.get('folder_hints') and 'series' in sources:
-                    sources['series']='folder';scores['series']=.48
+                    sources['series']='folder, explicit series marker';scores['series']=.48
                 for k,v in embedded.items():
                     if v not in (None,'',[]): data[k]=v; sources[k]='embedded'; scores[k]=.95 if k!='series_index' else .92
                 if online: emit('stage', path=str(path), stage='online metadata lookup', processed=processed)
@@ -448,11 +469,16 @@ def scan(db, root, online=True, progress=None):
                         category=db.execute('SELECT id FROM categories WHERE name=?',(genre,)).fetchone()['id']
                         db.execute('INSERT INTO book_categories(book_id,category_id,confidence,source) VALUES(?,?,?,?) ON CONFLICT(book_id,category_id) DO UPDATE SET confidence=excluded.confidence,source=excluded.source WHERE confirmed=0',(book_id,category,score,source))
                 if old:
-                    db.execute('UPDATE files SET book_id=?,extension=?,bytes=?,modified_ns=?,created_ns=?,fingerprint=?,last_seen=?,missing=0,extract_error=?,extra_json=?,content_sha256=? WHERE id=?',(book_id,path.suffix.lower(),st.st_size,st.st_mtime_ns,getattr(st,'st_birthtime_ns',None) or st.st_ctime_ns,fingerprint,started,err,json.dumps(raw),digest,old['id']))
+                    db.execute('UPDATE files SET book_id=?,extension=?,bytes=?,modified_ns=?,created_ns=?,fingerprint=?,last_seen=?,missing=0,extract_error=?,extra_json=?,content_sha256=?,extractor_version=? WHERE id=?',(book_id,path.suffix.lower(),st.st_size,st.st_mtime_ns,getattr(st,'st_birthtime_ns',None) or st.st_ctime_ns,fingerprint,started,err,json.dumps(raw),digest,EXTRACTOR_VERSION,old['id']))
                     totals['updated']+=1
                 else:
-                    db.execute('INSERT INTO files(book_id,path,extension,bytes,modified_ns,created_ns,fingerprint,last_seen,extract_error,extra_json,content_sha256) VALUES(?,?,?,?,?,?,?,?,?,?,?)',(book_id,str(path),path.suffix.lower(),st.st_size,st.st_mtime_ns,getattr(st,'st_birthtime_ns',None) or st.st_ctime_ns,fingerprint,started,err,json.dumps(raw),digest))
+                    db.execute('INSERT INTO files(book_id,path,extension,bytes,modified_ns,created_ns,fingerprint,last_seen,extract_error,extra_json,content_sha256,extractor_version) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)',(book_id,str(path),path.suffix.lower(),st.st_size,st.st_mtime_ns,getattr(st,'st_birthtime_ns',None) or st.st_ctime_ns,fingerprint,started,err,json.dumps(raw),digest,EXTRACTOR_VERSION))
                     totals['new']+=1
+                file_id=db.execute('SELECT id FROM files WHERE path=?',(str(path),)).fetchone()['id']
+                db.execute('DELETE FROM folder_categories WHERE file_id=?',(file_id,))
+                for i, folder in enumerate(path.relative_to(root).parts[:-1]):
+                    if folder and not folder.startswith('.'):
+                        db.execute('INSERT INTO folder_categories(file_id,folder_path,category,confidence) VALUES(?,?,?,?)',(file_id,str(Path(*path.relative_to(root).parts[:i+1])),folder,0.45))
                 emit('stage', path=str(path), stage='caching cover', processed=processed)
                 if not book or not book['cover_path']:
                     cache_cover(db,book_id,path=path,url=data.get('cover_url'),download=online)
