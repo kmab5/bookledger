@@ -115,3 +115,11 @@ The GitHub Pages landing page is separate from the local FastAPI app. GitHub Pag
 Back up the SQLite database before upgrading. The migration adds `files.extractor_version` and a new `folder_categories` table. Existing reading records remain intact.
 
 The series algorithm is still deterministic and intentionally conservative: filename/embedded volume numbers and explicitly named series folders are evidence, not guarantees. Ambiguous cases should be confirmed manually.
+
+## v0.6 notes
+
+- A malformed or corrupt EPUB cover entry no longer interrupts a whole-library scan. Cover failures are best-effort; unreadable covers may remain blank.
+- The scan activity log stays scrolled to the latest event during automatic refresh.
+- Books can be hidden from the default catalog using the book-detail action, then found through Library → visibility → Hidden books only (or All books). Hidden books are retained in SQLite and available to exports, reviews and direct links.
+- Shared UI spacing, responsive filters, navigation and focus styles have been revised.
+- Existing SQLite databases migrate automatically with a new `books.hidden` field. Back up your database before upgrading.

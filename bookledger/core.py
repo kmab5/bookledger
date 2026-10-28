@@ -1,12 +1,12 @@
 """Metadata-only ingest. Never writes to books or moves them."""
 from __future__ import annotations
-import hashlib, json, os, re, sqlite3, time, urllib.parse, urllib.request, zipfile, subprocess, shutil, mimetypes
+import hashlib, json, os, re, sqlite3, time, urllib.parse, urllib.request, zipfile, subprocess, shutil, mimetypes, zlib
 from datetime import datetime, timezone
 from pathlib import Path
 from difflib import SequenceMatcher
 from xml.etree import ElementTree as ET
 
-EXTRACTOR_VERSION = 6  # Bump when metadata, cover, or classification logic changes.
+EXTRACTOR_VERSION = 7  # Bump when metadata, cover, or classification logic changes.
 FORMATS = {'.epub', '.pdf', '.mobi', '.azw', '.azw3', '.fb2', '.cbz', '.cbr', '.djvu', '.djv', '.txt', '.rtf', '.html', '.htm'}
 SCHEMA = """
 PRAGMA foreign_keys=ON;
@@ -69,6 +69,9 @@ def connect(path: str | Path):
     db.execute('''CREATE TABLE IF NOT EXISTS folder_categories (file_id INTEGER NOT NULL REFERENCES files(id) ON DELETE CASCADE, folder_path TEXT NOT NULL, category TEXT NOT NULL, confidence REAL NOT NULL, PRIMARY KEY(file_id, folder_path))''')
     db.execute('CREATE INDEX IF NOT EXISTS idx_folder_categories_name ON folder_categories(category)')
     db.execute('CREATE INDEX IF NOT EXISTS idx_files_sha256 ON files(content_sha256)')
+    if 'hidden' not in {row[1] for row in db.execute('PRAGMA table_info(books)')}:
+        db.execute("ALTER TABLE books ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0")
+    db.execute("CREATE INDEX IF NOT EXISTS idx_books_hidden ON books(hidden)")
     db.commit()
     return db
 
@@ -334,7 +337,7 @@ def cache_cover(db, book_id, path=None, url=None, download=True):
                     if candidates:
                         member=(basedir / urllib.parse.unquote(candidates[0].attrib['href'])).as_posix()
                         if member in z.namelist():data=z.read(member)
-        except (OSError,KeyError,ValueError,StopIteration,zipfile.BadZipFile,ET.ParseError):pass
+        except (OSError,KeyError,ValueError,StopIteration,zipfile.BadZipFile,ET.ParseError,zlib.error,EOFError,RuntimeError):pass
     if data is None and url and download and url.startswith('https://'):
         try:
             req=urllib.request.Request(url,headers={'User-Agent':'BookLedger/0.4'})
@@ -481,11 +484,15 @@ def scan(db, root, online=True, progress=None):
                         db.execute('INSERT INTO folder_categories(file_id,folder_path,category,confidence) VALUES(?,?,?,?)',(file_id,str(Path(*path.relative_to(root).parts[:i+1])),folder,0.45))
                 emit('stage', path=str(path), stage='caching cover', processed=processed)
                 if not book or not book['cover_path']:
-                    cache_cover(db,book_id,path=path,url=data.get('cover_url'),download=online)
+                    try:
+                        cache_cover(db,book_id,path=path,url=data.get('cover_url'),download=online)
+                    except Exception as cover_exc:
+                        # Covers are optional metadata. An invalid cover must never abort a scan.
+                        emit('error', path=str(path), message=f'cover unavailable: {type(cover_exc).__name__}: {cover_exc}', processed=processed, **totals)
                 if err: totals['errors']+=1
                 db.commit()
                 emit('file_done', path=str(path), outcome='updated' if old else 'new', warning=err, processed=processed, **totals)
-            except (OSError,sqlite3.DatabaseError,ValueError) as exc:
+            except (OSError,sqlite3.DatabaseError,ValueError,zipfile.BadZipFile,zlib.error,EOFError,ET.ParseError) as exc:
                 totals['errors']+=1
                 emit('error', path=str(path), message=str(exc), processed=processed, **totals)
     # Do not mark files absent unless inside the scanned tree; missing is reversible.

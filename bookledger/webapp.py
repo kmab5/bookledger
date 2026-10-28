@@ -61,8 +61,8 @@ def create_app(db_path):
         const esc=x=>String(x??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
         async function refresh(){try{const r=await fetch('/scan/status',{cache:'no-store'});if(!r.ok)throw Error('Status request failed');const j=await r.json();
         if(j.status==='idle'){target.textContent='No scan started yet.';return}
-        const counts=j.counts||{};const lines=(j.events||[]).map(e=>esc(e)).join('\n');
-        target.innerHTML='<p><strong>'+esc(j.status)+'</strong> · '+esc(j.folder)+'</p><p>'+esc(j.processed||0)+' files encountered · '+esc(counts.new||0)+' new · '+esc(counts.updated||0)+' updated · '+esc(counts.unchanged||0)+' unchanged · '+esc(counts.errors||0)+' errors</p><p>Current: '+esc(j.current||'—')+'</p><p>Stage: '+esc(j.stage||'—')+'</p>'+(j.error?'<p>'+esc(j.error)+'</p>':'')+'<pre style="max-height:350px;overflow:auto">'+lines+'</pre>';
+        const counts=j.counts||{};const lines=(j.events||[]).map(e=>esc(e)).join('\\n');
+        target.innerHTML='<p><strong>'+esc(j.status)+'</strong> · '+esc(j.folder)+'</p><p>'+esc(j.processed||0)+' files encountered · '+esc(counts.new||0)+' new · '+esc(counts.updated||0)+' updated · '+esc(counts.unchanged||0)+' unchanged · '+esc(counts.errors||0)+' errors</p><p>Current: '+esc(j.current||'—')+'</p><p>Stage: '+esc(j.stage||'—')+'</p>'+(j.error?'<p>'+esc(j.error)+'</p>':'')+'<pre id="scan-log" role="log" aria-label="scan event log" style="max-height:350px;overflow:auto">'+lines+'</pre>';const log=document.getElementById('scan-log');if(log)log.scrollTop=log.scrollHeight;
         }catch(e){target.textContent=e.message}}
         refresh();setInterval(refresh,1500);
         </script>'''.replace('__CSRF_TOKEN__',token()))
@@ -158,9 +158,11 @@ def create_app(db_path):
         return Response(data,media_type='application/json' if kind=='json' else 'text/csv; charset=utf-8',headers={'Content-Disposition':f'attachment; filename="bookledger-{kind}.{ "json" if kind=="json" else "csv"}"'})
 
     @app.get('/',response_class=HTMLResponse)
-    def index(q:str='',status:str='',category:str='',series:str='',sort:str='title'):
+    def index(q:str='',status:str='',category:str='',series:str='',sort:str='title',visibility:str='visible'):
         with db() as c:
             where=['1=1'];args=[]
+            if visibility=='hidden':where.append('b.hidden=1')
+            elif visibility!='all':where.append('b.hidden=0')
             if q:
                 where.append('(b.title LIKE ? OR b.authors LIKE ? OR b.series LIKE ?)');args += [f'%{q}%']*3
             if status:
@@ -175,9 +177,19 @@ def create_app(db_path):
             series_names=[x[0] for x in c.execute('SELECT DISTINCT series FROM books WHERE series IS NOT NULL AND series<>"" ORDER BY series')]
             count=c.execute('SELECT COUNT(*) FROM books').fetchone()[0]; pending=c.execute('SELECT COUNT(*) FROM review_queue WHERE resolved=0').fetchone()[0]
         options=lambda opts,current:''.join(f'<option value="{h(v)}" {"selected" if v==current else ""}>{h(n)}</option>' for v,n in opts)
-        filters=f'<form method="get" class="panel toolbar"><input name="q" placeholder="Title, author or series" value="{h(q)}"><select name="status">{options([("","Any reading status")]+[(x,LABELS[x]) for x in STATES],status)}</select><select name="category">{options([("","Any category")]+[(x,x) for x in categories],category)}</select><select name="series">{options([("","Any series")]+[(x,x) for x in series_names],series)}</select><select name="sort">{options([("title","Title"),("author","Author"),("date","Recently indexed"),("series","Series order")],sort)}</select><button>Filter</button></form>'
+        filters=f'<form method="get" class="panel toolbar"><input name="q" placeholder="Title, author or series" value="{h(q)}"><select name="status">{options([("","Any reading status")]+[(x,LABELS[x]) for x in STATES],status)}</select><select name="category">{options([("","Any category")]+[(x,x) for x in categories],category)}</select><select name="series">{options([("","Any series")]+[(x,x) for x in series_names],series)}</select><select name="visibility" aria-label="Book visibility">{options([("visible","Visible books"),("hidden","Hidden books only"),("all","All books")],visibility)}</select><select name="sort">{options([("title","Title"),("author","Author"),("date","Recently indexed"),("series","Series order")],sort)}</select><button>Filter</button></form>'
         cards=''.join(f'<article class="panel book-card"><a href="/book/{b["id"]}">'+(f'<img class="book-cover" loading="lazy" src="/cover/{b["id"]}" alt="cover of {h(b["title"])}">' if b['cover_path'] else f'<div class="book-cover-placeholder">{h(b["title"])}</div>')+f'</a><div class="book-info"><a href="/book/{b["id"]}"><strong>{h(b["title"])}</strong></a><p>{h(", ".join(jsonarr(b["authors"])))}</p><p>{h(b["series"] or "")}{" · #"+h(b["series_index"]) if b["series_index"] is not None else ""}</p><span class="tag">{h(LABELS.get(b["status"],"Not answered"))}</span>{"<span class=badge>review</span>" if b["needs_review"] else ""}</div></article>' for b in rows)
         return layout('Library',f'<div class=section-head>your catalog / overview</div><h1>your library<span style="color:var(--primary)">.</span></h1><div class=stat-strip><div class=stat-chip><b>{count:,}</b> titles</div><div class=stat-chip><b>{pending:,}</b> suggestions</div><div class=stat-chip><b>{len(rows):,}</b> shown</div></div>{filters}<section class="grid">{cards or "<p>No books found. Run bookledger scan first.</p>"}</section>')
+    @app.post('/book/{book_id}/visibility')
+    def set_visibility(book_id:int,csrf:str=Form(...),hidden:str=Form(...)):
+        guard(csrf)
+        if hidden not in ('0','1'):raise HTTPException(422,'Invalid visibility')
+        with db() as c:
+            changed=c.execute('UPDATE books SET hidden=?,updated_at=? WHERE id=?',(int(hidden),now(),book_id))
+            if not changed.rowcount:raise HTTPException(404)
+            c.commit()
+        return go(f'/book/{book_id}')
+
     @app.get('/book/{book_id}',response_class=HTMLResponse)
     def book(book_id:int):
         with db() as c:
@@ -193,6 +205,7 @@ def create_app(db_path):
             series_members=c.execute('SELECT id,title,series_index FROM books WHERE series=? AND id<>? ORDER BY series_index,title LIMIT 150',(b['series'],book_id)).fetchall() if b['series'] else []
             pending=c.execute('SELECT id,field,suggested,confidence,reason FROM review_queue WHERE book_id=? AND resolved=0',(book_id,)).fetchall()
         fields=''.join(f'<p><b>{h(key.replace("_"," ").title())}:</b> {h(", ".join(jsonarr(b[key])) if key in ("authors","subjects") else b[key])}</p>' for key in ('isbn13','isbn10','language','publisher','published','description','series','series_index','page_count','page_count_kind','word_count','cover_url') if b[key])
+        visibility_form=f'<form method="post" action="/book/{book_id}/visibility" class="visibility-form">{token()}<input type="hidden" name="hidden" value="{0 if b["hidden"] else 1}"><button class="ghost" type="submit">{ "unhide book" if b["hidden"] else "hide from library" }</button><span class="muted">{ "this book is hidden from the default catalog" if b["hidden"] else "keep the metadata; remove it from the default catalog" }</span></form>'
         statusopts=''.join(f'<option value="{s}" {"selected" if r and r["status"]==s else ""}>{LABELS[s]}</option>' for s in STATES)
         def val(k):return h(r[k] if r and r[k] is not None else '')
         reading=f'''<form method="post" action="/book/{book_id}/reading" class="panel">{token()}<h2>Reading record</h2><label>Status<select name="status">{statusopts}</select></label><label>Started<input type="date" name="started" value="{val('started')}"></label><label>Finished<input type="date" name="finished" value="{val('finished')}"></label><label>Time read (minutes)<input type="number" min="0" name="minutes_read" value="{val('minutes_read')}"></label><label>Current page<input type="number" min="0" name="current_page" value="{val('current_page')}"></label><label>Rating (0–5)<input type="number" min="0" max="5" step="0.5" name="rating" value="{val('rating')}"></label><label>Read count<input type="number" min="0" name="read_count" value="{val('read_count')}"></label><label>Notes<textarea name="notes" rows="5">{val('notes')}</textarea></label><button>Save reading record</button></form>'''
