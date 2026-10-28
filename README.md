@@ -61,3 +61,15 @@ Termux-native support is a future target. PyMuPDF wheels might not be available 
 python -m pip install -e '.[test]'
 pytest -q
 ```
+
+
+## Version 0.2 upgrades
+
+- **Edition-safe matching:** different files with matching title/author no longer automatically collapse into one bibliographic record. File-identical copies are linked through streaming SHA-256 hashes; matching ISBN records are also associated. Possible alternate editions appear under **Possible editions** for review; resolution never modifies book files.
+- **Series catalog:** every detected series is registered automatically. The **Series** page lists titles and completed counts and supports renaming a series, descriptions, and personal notes. Renaming updates the database references only.
+- **More extraction:** CBZ ComicInfo.xml, page/image count; optional Calibre `ebook-meta` for MOBI, AZW, AZW3, CBR, DJVU, RTF, TXT, and HTML. Calibre is *not* required to run BookLedger.
+- **Existing databases:** opening an existing v0.1 database applies the additive SHA-256 column and creates the new tables automatically. Back up the SQLite database before upgrading; previously scanned files acquire hashes when they are reprocessed (a changed file or new file).
+
+**No login or authentication was added.** Keep `bookledger serve` on localhost by default, and use `--host 0.0.0.0` only on a trusted Wi-Fi network. Without authentication, anyone who can reach the server can change its data.
+
+**Important limitations:** filenames alone cannot reliably identify editions or series; online catalog lookups may suggest work-level metadata rather than edition-specific data. EPUB page count is not a fixed number. Some formats rely on an optional installed Calibre executable. The current edition-suggestion workflow labels relationships; it intentionally does not auto-merge records or their reading histories.

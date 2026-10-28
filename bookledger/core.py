@@ -1,6 +1,6 @@
 """Metadata-only ingest. Never writes to books or moves them."""
 from __future__ import annotations
-import hashlib, json, os, re, sqlite3, time, urllib.parse, urllib.request, zipfile
+import hashlib, json, os, re, sqlite3, time, urllib.parse, urllib.request, zipfile, subprocess, shutil
 from datetime import datetime, timezone
 from pathlib import Path
 from difflib import SequenceMatcher
@@ -49,12 +49,21 @@ CREATE TABLE IF NOT EXISTS review_queue (
 );
 CREATE TABLE IF NOT EXISTS scan_runs (id INTEGER PRIMARY KEY, root TEXT NOT NULL, started TEXT NOT NULL, ended TEXT, count_new INTEGER NOT NULL DEFAULT 0, count_updated INTEGER NOT NULL DEFAULT 0, count_unchanged INTEGER NOT NULL DEFAULT 0, errors INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS external_cache (key TEXT PRIMARY KEY, payload TEXT NOT NULL, fetched_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS series_catalog (id INTEGER PRIMARY KEY, name TEXT NOT NULL UNIQUE COLLATE NOCASE, description TEXT, notes TEXT, updated_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS book_links (id INTEGER PRIMARY KEY, book_id INTEGER NOT NULL REFERENCES books(id) ON DELETE CASCADE, candidate_id INTEGER NOT NULL REFERENCES books(id) ON DELETE CASCADE, kind TEXT NOT NULL, confidence REAL NOT NULL, resolved INTEGER NOT NULL DEFAULT 0, UNIQUE(book_id,candidate_id,kind));
+CREATE INDEX IF NOT EXISTS idx_links_candidate ON book_links(candidate_id);
+
 """
 
 def now(): return datetime.now(timezone.utc).isoformat(timespec='microseconds')
 def connect(path: str | Path):
     db = sqlite3.connect(str(Path(path).expanduser())); db.row_factory = sqlite3.Row
-    db.executescript(SCHEMA); return db
+    db.executescript(SCHEMA)
+    if 'content_sha256' not in {row[1] for row in db.execute('PRAGMA table_info(files)')}:
+        db.execute('ALTER TABLE files ADD COLUMN content_sha256 TEXT')
+    db.execute('CREATE INDEX IF NOT EXISTS idx_files_sha256 ON files(content_sha256)')
+    db.commit()
+    return db
 
 def clean(s): return re.sub(r'\s+', ' ', str(s or '')).strip()
 def norm(s): return re.sub(r'[^a-z0-9]+', '', clean(s).casefold())
@@ -117,6 +126,49 @@ def epub_meta(path):
         if words: out['word_count']=words
     return out, raw
 
+def optional_ebook_meta(path):
+    """Use Calibre when installed; metadata only, never convert or edit an ebook."""
+    exe=shutil.which('ebook-meta')
+    if not exe: return {}, {}, 'Install Calibre ebook-meta for deeper format extraction'
+    try:
+        cp=subprocess.run([exe,str(path)],capture_output=True,text=True,timeout=18,check=True)
+        raw={'calibre_output':cp.stdout[:12000]}; entries={}
+        for line in cp.stdout.splitlines():
+            if ':' in line:
+                k,v=line.split(':',1); entries[k.strip().casefold()]=clean(v)
+        out={}
+        mapping={'title':'title','publisher':'publisher','language':'language','comments':'description','series':'series','published':'published'}
+        for src,dst in mapping.items():
+            if entries.get(src):out[dst]=entries[src]
+        if entries.get('author(s)'):out['authors']=[clean(v) for v in re.split(r'\s*&\s*',entries['author(s)']) if clean(v)]
+        if entries.get('tags'):out['subjects']=[clean(v) for v in entries['tags'].split(',') if clean(v)]
+        for k in ('isbn','identifiers'):
+            val=entries.get(k,''); match=re.search(r'(?<!\d)(97[89]\d{10}|\d{9}[\dXx])(?!\d)',re.sub(r'[- ]','',val))
+            if match:out['isbn13' if len(match[1])==13 else 'isbn10']=match[1]
+        if entries.get('series index'):
+            try:out['series_index']=float(entries['series index'])
+            except ValueError:pass
+        return out,raw,None
+    except (subprocess.TimeoutExpired,subprocess.CalledProcessError,OSError) as exc:
+        return {},{},f'Calibre extraction failed: {str(exc)[:180]}'
+
+def cbz_meta(path):
+    """CBZ pages are image entries; optional ComicInfo.xml supplies comic metadata."""
+    with zipfile.ZipFile(path) as z:
+        imgs=[n for n in z.namelist() if n.lower().endswith(('.png','.jpg','.jpeg','.webp','.gif','.avif')) and not n.endswith('/')]
+        out={'page_count':len(imgs),'page_count_kind':'image_count'} if imgs else {}
+        raw={'image_entries':len(imgs)}
+        info=next((n for n in z.namelist() if n.lower().endswith('comicinfo.xml')),None)
+        if info:
+            root=ET.fromstring(z.read(info)); vals={x.tag.rsplit('}',1)[-1]:clean(x.text) for x in root if x.text}
+            raw['comicinfo']=vals
+            for src,dst in [('Title','title'),('Series','series'),('Writer','authors'),('LanguageISO','language'),('Summary','description'),('Publisher','publisher')]:
+                if vals.get(src):out[dst]=[clean(x) for x in vals[src].split(',')] if dst=='authors' else vals[src]
+            if vals.get('Number'):
+                try:out['series_index']=float(vals['Number'])
+                except ValueError:pass
+        return out,raw
+
 def pdf_meta(path):
     import fitz
     with fitz.open(path) as doc:
@@ -151,6 +203,9 @@ def extract(path):
         if ext=='.epub': return (*epub_meta(path), None)
         if ext=='.pdf': return (*pdf_meta(path), None)
         if ext=='.fb2': return (*fb2_meta(path), None)
+        if ext=='.cbz': return (*cbz_meta(path), None)
+        if ext in ('.mobi','.azw','.azw3','.cbr','.djvu','.djv','.rtf','.txt','.html','.htm'):
+            return optional_ebook_meta(path)
         return ({}, {}, f'No embedded extractor for {ext}; filename metadata retained')
     except Exception as exc:
         return ({}, {}, f'{type(exc).__name__}: {exc}'[:500])
@@ -212,6 +267,23 @@ def file_fingerprint(path, stat):
     # Cheap fingerprint avoids reading large files on repeat scans.
     return f'{stat.st_size}:{stat.st_mtime_ns}'
 
+def file_sha256(path):
+    digest=hashlib.sha256()
+    with open(path,'rb') as stream:
+        for chunk in iter(lambda:stream.read(1024*1024),b''):digest.update(chunk)
+    return digest.hexdigest()
+
+def potential_related(db, book_id, data):
+    """Never auto-merge title-only similarities. Flag likely alternate editions."""
+    if not data.get('authors'):return
+    candidates=db.execute('SELECT id,title,authors,isbn10,isbn13 FROM books WHERE id<>?',(book_id,)).fetchall()
+    for candidate in candidates:
+        title_sim=SequenceMatcher(None,norm(candidate['title']),norm(data.get('title'))).ratio()
+        author_overlap=any(norm(a)==norm(b) for a in data['authors'] for b in jsonarr(candidate['authors']))
+        if title_sim>=.91 and author_overlap:
+            a,b=sorted((book_id,candidate['id']))
+            db.execute('INSERT OR IGNORE INTO book_links(book_id,candidate_id,kind,confidence) VALUES(?,?,?,?)',(a,b,'possible_edition',min(.99,round(title_sim*.96,3))))
+
 def scan(db, root, online=True):
     root=Path(root).expanduser().resolve()
     if not root.is_dir(): raise ValueError(f'Not a folder: {root}')
@@ -228,6 +300,7 @@ def scan(db, root, online=True):
                 if old and old['fingerprint']==fingerprint:
                     db.execute('UPDATE files SET last_seen=?,missing=0 WHERE id=?',(started,old['id'])); totals['unchanged']+=1; continue
                 guessed=parse_name(path); embedded, raw, err=extract(path)
+                digest=file_sha256(path)
                 data={**guessed}; sources={k:'filename' for k,v in guessed.items() if v}; scores={k:.55 for k in sources}
                 for k,v in embedded.items():
                     if v not in (None,'',[]): data[k]=v; sources[k]='embedded'; scores[k]=.95 if k!='series_index' else .92
@@ -241,11 +314,16 @@ def scan(db, root, online=True):
                     isbn=data.get('isbn13') or data.get('isbn10')
                     if isbn: book=db.execute('SELECT * FROM books WHERE isbn13=? OR isbn10=? LIMIT 1',(isbn,isbn)).fetchone()
                 if book is None:
-                    for candidate in db.execute('SELECT * FROM books WHERE manually_verified=0 OR manually_verified=1'):
-                        if norm(candidate['title'])==norm(data['title']) and data.get('authors') and any(norm(a)==norm(b) for a in data['authors'] for b in jsonarr(candidate['authors'])):
-                            book=candidate; break
+                    # Identical bytes are the same manifestation, regardless of filename.
+                    same=db.execute('SELECT book_id FROM files WHERE content_sha256=? LIMIT 1',(digest,)).fetchone()
+                    if same:book=db.execute('SELECT * FROM books WHERE id=?',(same['book_id'],)).fetchone()
+                # Deliberately DO NOT merge by title+author alone: different editions
+                # and translations can have matching bibliographic names.
                 raw['enrichment']=enrichment
-                if book and book['manually_verified']:
+                if data.get('series'):
+                    db.execute('INSERT OR IGNORE INTO series_catalog(name,updated_at) VALUES(?,?)',(data['series'],now()))
+                if book and (book['manually_verified'] or (not old and db.execute('SELECT 1 FROM files WHERE book_id=? AND content_sha256=?',(book['id'],digest)).fetchone())):
+                    # A byte-identical additional path must not overwrite catalog fields.
                     book_id=book['id']
                 else:
                     fields=['title','subtitle','authors','isbn10','isbn13','language','publisher','published','description','subjects','series','series_index','page_count','page_count_kind','word_count','cover_url']
@@ -262,6 +340,7 @@ def scan(db, root, online=True):
                         book_id=db.execute('INSERT INTO books('+','.join(values)+') VALUES('+','.join('?' for _ in values)+')',tuple(values.values())).lastrowid
                         db.execute('INSERT INTO reading(book_id,updated_at) VALUES (?,?)',(book_id,now()))
                     db.execute('DELETE FROM review_queue WHERE book_id=? AND resolved=0',(book_id,))
+                    if not book:potential_related(db,book_id,data)
                     for field in ('title','authors','series','series_index'):
                         if data.get(field) and scores.get(field,0)<.8:
                             db.execute('INSERT OR REPLACE INTO review_queue(book_id,field,suggested,confidence,reason) VALUES(?,?,?,?,?)',(book_id,field,json.dumps(data[field]),scores[field],f'Inferred from {sources[field]}; verify before accepting'))
@@ -270,10 +349,10 @@ def scan(db, root, online=True):
                         category=db.execute('SELECT id FROM categories WHERE name=?',(genre,)).fetchone()['id']
                         db.execute('INSERT INTO book_categories(book_id,category_id,confidence,source) VALUES(?,?,?,?) ON CONFLICT(book_id,category_id) DO UPDATE SET confidence=excluded.confidence,source=excluded.source WHERE confirmed=0',(book_id,category,score,source))
                 if old:
-                    db.execute('UPDATE files SET book_id=?,extension=?,bytes=?,modified_ns=?,created_ns=?,fingerprint=?,last_seen=?,missing=0,extract_error=?,extra_json=? WHERE id=?',(book_id,path.suffix.lower(),st.st_size,st.st_mtime_ns,getattr(st,'st_birthtime_ns',None) or st.st_ctime_ns,fingerprint,started,err,json.dumps(raw),old['id']))
+                    db.execute('UPDATE files SET book_id=?,extension=?,bytes=?,modified_ns=?,created_ns=?,fingerprint=?,last_seen=?,missing=0,extract_error=?,extra_json=?,content_sha256=? WHERE id=?',(book_id,path.suffix.lower(),st.st_size,st.st_mtime_ns,getattr(st,'st_birthtime_ns',None) or st.st_ctime_ns,fingerprint,started,err,json.dumps(raw),digest,old['id']))
                     totals['updated']+=1
                 else:
-                    db.execute('INSERT INTO files(book_id,path,extension,bytes,modified_ns,created_ns,fingerprint,last_seen,extract_error,extra_json) VALUES(?,?,?,?,?,?,?,?,?,?)',(book_id,str(path),path.suffix.lower(),st.st_size,st.st_mtime_ns,getattr(st,'st_birthtime_ns',None) or st.st_ctime_ns,fingerprint,started,err,json.dumps(raw)))
+                    db.execute('INSERT INTO files(book_id,path,extension,bytes,modified_ns,created_ns,fingerprint,last_seen,extract_error,extra_json,content_sha256) VALUES(?,?,?,?,?,?,?,?,?,?,?)',(book_id,str(path),path.suffix.lower(),st.st_size,st.st_mtime_ns,getattr(st,'st_birthtime_ns',None) or st.st_ctime_ns,fingerprint,started,err,json.dumps(raw),digest))
                     totals['new']+=1
                 if err: totals['errors']+=1
                 db.commit()

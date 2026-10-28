@@ -10,7 +10,7 @@ LABELS={'unanswered':'Not answered','not_read':'Not read','want_to_read':'Want t
 CSS='''*{box-sizing:border-box}body{font-family:system-ui,Segoe UI,sans-serif;margin:0;background:#f6f7f9;color:#1c2633}header{background:#16283f;color:white;padding:20px}header a{color:white;margin-right:22px;text-decoration:none}main{max-width:1150px;margin:24px auto;padding:0 16px}.panel{background:white;border:1px solid #e0e6ec;border-radius:14px;padding:20px;margin-bottom:16px;box-shadow:0 3px 14px #172b4410}.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(270px,1fr));gap:12px}.muted{color:#637084;font-size:.91rem}.tag{background:#e7eef7;border-radius:6px;padding:3px 7px;font-size:.8rem;display:inline-block;margin:2px}a{color:#1764ac}label{display:block;font-size:.9rem;margin-top:12px}input,select,textarea{font:inherit;width:100%;padding:9px;border:1px solid #b9c5d0;border-radius:8px;background:white}button{background:#1764ac;color:white;padding:10px 15px;border:0;border-radius:8px;cursor:pointer;margin-top:12px}button.ghost{background:#53647a}.toolbar{display:flex;gap:10px;flex-wrap:wrap}.toolbar>*{flex:1;min-width:150px}.badge{font-size:.78rem;padding:4px 7px;border-radius:8px;background:#f5e8c8}.good{background:#d8f2df}.split{display:grid;grid-template-columns:2fr 1fr;gap:18px}pre{white-space:pre-wrap;word-break:break-all}details{margin-top:12px}@media(max-width:700px){.split{grid-template-columns:1fr}header a{display:inline-block;margin-bottom:10px}}'''
 def h(s):return html.escape(str(s if s is not None else ''),quote=True)
 def layout(title,body):
-    return HTMLResponse(f'<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{h(title)} - BookLedger</title><style>{CSS}</style></head><body><header><strong>BookLedger</strong><nav><a href="/">Library</a><a href="/review">Metadata review</a><a href="/reading">Have you read it?</a><a href="/stats">Statistics</a></nav></header><main>{body}</main></body></html>')
+    return HTMLResponse(f'<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{h(title)} - BookLedger</title><style>{CSS}</style></head><body><header><strong>BookLedger</strong><nav><a href="/">Library</a><a href="/review">Metadata review</a><a href="/reading">Have you read it?</a><a href="/stats">Statistics</a><a href="/series">Series</a><a href="/duplicates">Possible editions</a></nav></header><main>{body}</main></body></html>')
 def safe_date(v):
     if not v: return None
     from datetime import date
@@ -150,6 +150,40 @@ def create_app(db_path):
         with db() as c:
             c.execute('UPDATE reading SET status=?,updated_at=? WHERE book_id=?',(status,now(),book_id));c.commit()
         return go('/reading')
+    @app.get('/series',response_class=HTMLResponse)
+    def series_index():
+        with db() as c:
+            rows=c.execute("""SELECT s.*,COUNT(b.id) AS total, SUM(CASE WHEN r.status='finished' THEN 1 ELSE 0 END) AS completed FROM series_catalog s LEFT JOIN books b ON b.series=s.name COLLATE NOCASE LEFT JOIN reading r ON r.book_id=b.id GROUP BY s.id ORDER BY s.name""").fetchall()
+        items=''.join(f'<section class="panel"><h2>{h(x["name"])}</h2><p>{x["total"]} books · {x["completed"] or 0} finished</p><p>{h(x["description"] or "")}</p><p class="muted">{h(x["notes"] or "")}</p><form method="post" action="/series/{x["id"]}">{token()}<label>Name<input name="name" value="{h(x["name"])}" required maxlength="250"></label><label>Description<textarea name="description">{h(x["description"] or "")}</textarea></label><label>Personal notes<textarea name="notes">{h(x["notes"] or "")}</textarea></label><button>Save series</button></form></section>' for x in rows)
+        return layout('Series',f'<h1>Series catalog</h1><p>Renaming a series updates its member books without touching your files.</p>{items or "<p>No series found.</p>"}')
+    @app.post('/series/{series_id}')
+    def update_series(series_id:int,csrf:str=Form(...),name:str=Form(...),description:str=Form(''),notes:str=Form('')):
+        guard(csrf);name=name.strip()
+        if not name or len(name)>250:raise HTTPException(422)
+        with db() as c:
+            old=c.execute('SELECT * FROM series_catalog WHERE id=?',(series_id,)).fetchone()
+            if not old:raise HTTPException(404)
+            collision=c.execute('SELECT id FROM series_catalog WHERE name=? COLLATE NOCASE AND id<>?',(name,series_id)).fetchone()
+            if collision:raise HTTPException(409,'Another series already uses this name')
+            c.execute('UPDATE books SET series=?,updated_at=? WHERE series=? COLLATE NOCASE',(name,now(),old['name']))
+            c.execute('UPDATE series_catalog SET name=?,description=?,notes=?,updated_at=? WHERE id=?',(name,description,notes,now(),series_id));c.commit()
+        return go('/series')
+    @app.get('/duplicates',response_class=HTMLResponse)
+    def duplicates():
+        with db() as c:
+            rows=c.execute("""SELECT l.*,a.title AS a_title,b.title AS b_title,a.authors AS a_authors FROM book_links l JOIN books a ON a.id=l.book_id JOIN books b ON b.id=l.candidate_id WHERE l.resolved=0 ORDER BY l.confidence DESC LIMIT 250""").fetchall()
+            exact=c.execute("""SELECT content_sha256,COUNT(*) AS copies FROM files WHERE content_sha256 IS NOT NULL GROUP BY content_sha256 HAVING COUNT(*)>1""").fetchall()
+        panels=''.join(f'<div class="panel"><b><a href="/book/{x["book_id"]}">{h(x["a_title"])}</a></b> and <b><a href="/book/{x["candidate_id"]}">{h(x["b_title"])}</a></b><p class="muted">Possible alternate editions · similarity {round(x["confidence"]*100)}% · {h(", ".join(jsonarr(x["a_authors"])))}</p><form method="post" action="/duplicates/{x["id"]}">{token()}<button name="action" value="distinct" class="ghost">Keep as distinct editions</button><button name="action" value="related">Mark as related editions</button></form></div>' for x in rows)
+        return layout('Possible editions',f'<h1>Possible alternate editions</h1><p>{len(exact)} content hashes have multiple file references. Matching titles are never silently merged. Resolving a suggestion only labels the relationship; it does not merge book records or files.</p>{panels or "<p>No pending edition matches.</p>"}')
+    @app.post('/duplicates/{link_id}')
+    def resolve_duplicate(link_id:int,csrf:str=Form(...),action:str=Form(...)):
+        guard(csrf)
+        if action not in ('distinct','related'):raise HTTPException(422)
+        with db() as c:
+            result=c.execute('UPDATE book_links SET resolved=? WHERE id=? AND resolved=0',(1 if action=='related' else 2,link_id))
+            if not result.rowcount:raise HTTPException(404)
+            c.commit()
+        return go('/duplicates')
     @app.get('/stats',response_class=HTMLResponse)
     def stats():
         with db() as c:

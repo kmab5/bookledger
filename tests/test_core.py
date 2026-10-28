@@ -67,3 +67,38 @@ def test_catalog_categories_and_review(tmp_path):
     assert client.post('/reading/quick/1',data={'csrf':app.state.csrf,'status':'abandoned'}).status_code==200
     with connect(db_path) as db:
         assert db.execute('SELECT status FROM reading').fetchone()[0]=='abandoned'
+
+def test_distinct_editions_and_series_edit(tmp_path):
+    library=tmp_path/'library';library.mkdir()
+    (library/'Novel - Jane Writer.txt').write_text('edition one',encoding='utf-8')
+    (library/'Novel - Jane Writer.rtf').write_text('edition two',encoding='utf-8')
+    db_path=tmp_path/'catalog.db'
+    with connect(db_path) as c:
+        outcome=scan(c,library,online=False)
+        assert outcome['new']==2
+        assert c.execute('SELECT count(*) FROM books').fetchone()[0]==2
+        assert c.execute("SELECT count(*) FROM book_links WHERE kind='possible_edition'").fetchone()[0]==1
+        # File-identical different path correctly maps to the same book.
+        (library/'another copy.txt').write_text('edition one',encoding='utf-8')
+        scan(c,library,online=False)
+        assert c.execute('SELECT count(*) FROM books').fetchone()[0]==2
+        assert c.execute('SELECT count(*) FROM files').fetchone()[0]==3
+    app=create_app(db_path);client=TestClient(app)
+    assert 'Possible alternate editions' in client.get('/duplicates').text
+    assert client.get('/series').status_code==200
+    assert client.post('/duplicates/1',data={'csrf':app.state.csrf,'action':'distinct'},follow_redirects=False).status_code==303
+    with connect(db_path) as c:
+        assert c.execute('SELECT resolved FROM book_links WHERE id=1').fetchone()[0]==2
+
+
+def test_comicinfo_metadata(tmp_path):
+    from bookledger.core import extract
+    cbz=tmp_path/'comic.cbz'
+    with zipfile.ZipFile(cbz,'w') as z:
+        z.writestr('ComicInfo.xml','<ComicInfo><Title>First Issue</Title><Series>Test Comic</Series><Number>1</Number><Writer>A. Writer</Writer></ComicInfo>')
+        z.writestr('page01.png',b'not an actual png')
+        z.writestr('page02.jpg',b'not an actual jpg')
+    meta,raw,err=extract(cbz)
+    assert err is None
+    assert meta['page_count']==2 and meta['page_count_kind']=='image_count'
+    assert meta['series']=='Test Comic' and meta['series_index']==1
