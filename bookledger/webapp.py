@@ -317,30 +317,71 @@ def create_app(db_path):
         with db() as c:
             c.execute('UPDATE reading SET status=?,updated_at=? WHERE book_id=?',(status,now(),book_id));c.commit()
         return go('/reading')
+    # Series workspace: discovery is separate from editing. All changes are explicit.
     @app.get('/series',response_class=HTMLResponse)
-    def series_index():
+    def series_index(q:str='',sort:str='name',view:str='grid',state:str='all'):
         with db() as c:
-            rows=c.execute("""SELECT s.*,COUNT(b.id) AS total, SUM(CASE WHEN r.status='finished' THEN 1 ELSE 0 END) AS completed FROM series_catalog s LEFT JOIN books b ON b.series=s.name COLLATE NOCASE LEFT JOIN reading r ON r.book_id=b.id GROUP BY s.id ORDER BY s.name""").fetchall()
-        items=''.join(f'<section class="panel"><h2><a href="/series/{x["id"]}">{h(x["name"])}</a></h2><p>{x["total"]} books · {x["completed"] or 0} finished</p><p>{h(x["description"] or "")}</p><p class="muted">{h(x["notes"] or "")}</p><form method="post" action="/series/{x["id"]}">{token()}<label>Name<input name="name" value="{h(x["name"])}" required maxlength="250"></label><label>Description<textarea name="description">{h(x["description"] or "")}</textarea></label><label>Personal notes<textarea name="notes">{h(x["notes"] or "")}</textarea></label><button>Save series</button></form></section>' for x in rows)
-        return layout('Series',f'<h1>series catalog</h1><p>Manage series names and memberships. Suggested series are not definitive until you confirm them.</p><section class=panel><h2>create series</h2><form method=post action=/series/new>{token()}<label>Series name<input name=name required maxlength=250></label><button>Create</button></form></section>{items or "<p>No series found.</p>"}')
-    @app.get('/series/{series_id}')
-    def series_detail(series_id:int):
+            rows=c.execute('''SELECT s.*, COUNT(b.id) AS total,
+                SUM(CASE WHEN r.status='finished' THEN 1 ELSE 0 END) AS completed,
+                SUM(CASE WHEN r.status='reading' THEN 1 ELSE 0 END) AS active,
+                SUM(CASE WHEN b.series_index IS NULL THEN 1 ELSE 0 END) AS unordered
+                FROM series_catalog s LEFT JOIN books b ON b.series=s.name COLLATE NOCASE
+                LEFT JOIN reading r ON r.book_id=b.id GROUP BY s.id''').fetchall()
+            covers={x['id']:c.execute('SELECT id,title FROM books WHERE series=? COLLATE NOCASE ORDER BY series_index IS NULL,series_index,title LIMIT 3',(x['name'],)).fetchall() for x in rows}
+        entries=[x for x in rows if (not q or q.casefold() in x['name'].casefold()) and (state=='all' or (state=='unread' and not x['completed']) or (state=='in_progress' and x['active']) or (state=='complete' and x['total'] and x['total']==x['completed']) or (state=='needs_order' and x['unordered']))]
+        entries.sort(key=({'name':lambda x:x['name'].casefold(),'size':lambda x:-x['total'],'progress':lambda x:-(x['completed'] or 0)/max(1,x['total'])}.get(sort,lambda x:x['name'].casefold())))
+        def card(x):
+            volumes=covers[x['id']]
+            thumbs=''.join(f'<div class="series-cover"><img src="/cover/{bk["id"]}" alt="" loading="lazy" onerror="this.hidden=true"><span>{h(bk["title"])}</span></div>' for bk in volumes)
+            return f'''<a class="series-tile" href="/series/{x['id']}"><div class="series-stack">{thumbs or '<div class="series-empty">no books yet</div>'}</div><div class="series-tile-body"><div class="series-tile-title">{h(x['name'])}</div><div class="series-tile-meta">{x['total']} books <span aria-hidden="true">·</span> {x['completed'] or 0} finished</div><div class="series-progress" role="progressbar" aria-label="reading progress" aria-valuenow="{x['completed'] or 0}" aria-valuemin="0" aria-valuemax="{max(x['total'],1)}"><span style="width:{100*(x['completed'] or 0)/max(x['total'],1):.1f}%"></span></div>{'<div class="series-warning">order needs review</div>' if x['unordered'] else ''}</div></a>'''
+        def opt(v,t,current):return f'<option value="{h(v)}" {"selected" if v==current else ""}>{h(t)}</option>'
+        controls=f'''<form method="get" class="series-controls"><label>find a series<input name="q" value="{h(q)}" placeholder="search series…"></label><label>show<select name="state">{''.join(opt(v,t,state) for v,t in [('all','all series'),('in_progress','currently reading'),('complete','completed'),('unread','none finished'),('needs_order','missing volume order')])}</select></label><label>sort<select name="sort">{''.join(opt(v,t,sort) for v,t in [('name','name'),('size','most books'),('progress','most read')])}</select></label><button>apply</button></form>'''
+        summary=f'<div class="series-summary"><div><strong>{len(rows)}</strong><span>series</span></div><div><strong>{sum(x["total"] for x in rows)}</strong><span>assigned books</span></div><div><strong>{sum(bool(x["unordered"]) for x in rows)}</strong><span>need ordering</span></div></div>'
+        create=f'<details class="series-create"><summary>+ create a series</summary><form method="post" action="/series/new">{token()}<label>series name<input name="name" maxlength="250" required placeholder="new series name"></label><button>create series</button></form></details>'
+        return layout('series',f'<div class="series-head"><div><div class="section-head">library / collections</div><h1>your series.</h1><p class="muted">Browse your collections; open one to arrange books, correct volumes, and manage membership.</p></div>{create}</div>{summary}{controls}<div class="series-grid">{"".join(card(x) for x in entries) or "<p>No series match these filters.</p>"}</div>')
+
+    @app.get('/series/{series_id}',response_class=HTMLResponse)
+    def series_detail(series_id:int,q:str=''):
         with db() as c:
             item=c.execute('SELECT * FROM series_catalog WHERE id=?',(series_id,)).fetchone()
             if not item:raise HTTPException(404)
-            members=c.execute('SELECT b.id,b.title,b.series_index,b.authors,r.status FROM books b LEFT JOIN reading r ON r.book_id=b.id WHERE b.series=? COLLATE NOCASE ORDER BY b.series_index IS NULL,b.series_index,b.title',(item['name'],)).fetchall()
-            candidates=c.execute('SELECT b.id,b.title,b.authors FROM books b WHERE b.series IS NULL AND (b.title LIKE ? OR b.authors IN (SELECT authors FROM books WHERE series=? COLLATE NOCASE)) ORDER BY b.title LIMIT 100',(f'%{item["name"]}%',item['name'])).fetchall()
-        rows=''.join(f'<form class="related-card" method="post" action="/book/{b["id"]}/series">{token()}<a href="/book/{b["id"]}"><strong>{h(b["title"])}</strong></a><p class="muted">{h(", ".join(jsonarr(b["authors"])))}</p><input type=hidden name=series value="{h(item["name"])}"><label>volume / reading order<input aria-label="volume number for {h(b["title"])}" name=index type=number step=any min=0 value="{h(b["series_index"])}"></label><button>save volume</button></form>' for b in members)
-        assigned={m['id'] for m in members}
-        possible=''.join(f'<li><a href="/book/{b["id"]}">{h(b["title"])}</a></li>' for b in candidates if b['id'] not in assigned)
-        return layout(item['name'],f'<p><a href="/series">← all series</a></p><h1>{h(item["name"])}</h1><p>{len(members)} volumes · edit memberships from each book page</p><section class="series-collection">{rows or "<p>No volumes assigned yet.</p>"}</section><section class="panel"><h2>unassigned candidates</h2><p class="muted">These are heuristic leads, not automatically included.</p><ul>{possible or "<li>None suggested</li>"}</ul></section>')
+            members=c.execute('SELECT b.id,b.title,b.series_index,b.authors,b.cover_path,r.status FROM books b LEFT JOIN reading r ON r.book_id=b.id WHERE b.series=? COLLATE NOCASE ORDER BY b.series_index IS NULL,b.series_index,b.title',(item['name'],)).fetchall()
+            unassigned=c.execute('SELECT id,title,authors FROM books WHERE (series IS NULL OR TRIM(series)="") AND (title LIKE ? OR authors IN (SELECT authors FROM books WHERE series=? COLLATE NOCASE)) ORDER BY title LIMIT 40',(f'%{item["name"]}%',item['name'])).fetchall()
+            searches=c.execute('SELECT id,title,authors,series FROM books WHERE title LIKE ? AND (series IS NULL OR series<>? COLLATE NOCASE) ORDER BY title LIMIT 40',(f'%{q}%',item['name'])).fetchall() if q.strip() else []
+        count=len(members);done=sum(x['status']=='finished' for x in members)
+        def row(b):
+            status=LABELS.get(b['status'],'not answered')
+            return f'''<div class="series-volume"><a href="/book/{b['id']}" class="series-volume-cover"><img src="/cover/{b['id']}" loading="lazy" alt="cover of {h(b['title'])}" onerror="this.style.display='none'"></a><div class="series-volume-info"><a href="/book/{b['id']}"><strong>{h(b['title'])}</strong></a><span>{h(', '.join(jsonarr(b['authors'])))} · {h(status)}</span></div><form method="post" action="/series/{series_id}/member/{b['id']}" class="series-inline-edit">{token()}<label>volume<input type="number" step="any" min="0" name="index" value="{h(b['series_index'])}" aria-label="volume number for {h(b['title'])}"></label><button name="action" value="save">save</button><button class="ghost" name="action" value="remove" aria-label="remove {h(b['title'])} from series">remove</button></form></div>'''
+        def add_row(b):return f'<form class="series-candidate" method="post" action="/series/{series_id}/member/{b["id"]}">{token()}<div><strong>{h(b["title"])}</strong><span>{h(", ".join(jsonarr(b["authors"])))}</span></div><input type="hidden" name="index" value=""><button name="action" value="add">+ add</button></form>'
+        edit=f'''<details class="series-settings"><summary>series settings</summary><form method="post" action="/series/{series_id}">{token()}<label>series name<input name="name" maxlength="250" required value="{h(item['name'])}"></label><label>description<textarea name="description" rows="3">{h(item['description'] or '')}</textarea></label><label>private notes<textarea name="notes" rows="3">{h(item['notes'] or '')}</textarea></label><button>save details</button></form></details>'''
+        candidates=f'''<section class="series-side-panel"><h2>add books</h2><p class="muted">Search your whole library, or choose one of the possible matches below. Nothing is assigned automatically.</p><form method="get" action="/series/{series_id}"><label>find by title<input name="q" value="{h(q)}" placeholder="search a title…"></label><button>search library</button></form><div class="series-candidates">{''.join(add_row(b) for b in searches or unassigned) or '<p class="muted">No candidates found.</p>'}</div></section>'''
+        return layout(item['name'],f'''<div class="series-breadcrumb"><a href="/series">← all series</a></div><div class="series-detail-head"><div><div class="section-head">series / organize</div><h1>{h(item['name'])}</h1><p class="muted">{count} books · {done} finished · {count-done} remaining</p></div>{edit}</div><div class="series-workspace"><section class="series-main"><div class="series-section-top"><div><h2>reading order</h2><p class="muted">Set the volume number to organize your collection. Changes save per book.</p></div></div><div class="series-volumes">{''.join(row(b) for b in members) or '<div class="series-empty-state">No books assigned yet. Add books from the right.</div>'}</div></section>{candidates}</div>''')
+
+    @app.post('/series/{series_id}/member/{book_id}')
+    def update_member(series_id:int,book_id:int,csrf:str=Form(...),action:str=Form(...),index:str=Form('')):
+        guard(csrf)
+        if action not in ('save','add','remove'):raise HTTPException(422)
+        try:ordinal=float(index) if index.strip() else None
+        except ValueError:raise HTTPException(422,'Invalid volume')
+        if ordinal is not None and ordinal<0:raise HTTPException(422,'Invalid volume')
+        with db() as c:
+            series=c.execute('SELECT name FROM series_catalog WHERE id=?',(series_id,)).fetchone()
+            book=c.execute('SELECT series FROM books WHERE id=?',(book_id,)).fetchone()
+            if not series or not book:raise HTTPException(404)
+            if action in ('save','remove') and (book['series'] or '').casefold()!=series['name'].casefold():raise HTTPException(409,'Book no longer belongs to series')
+            c.execute('UPDATE books SET series=?,series_index=?,manually_verified=1,updated_at=? WHERE id=?',(None if action=='remove' else series['name'],None if action=='remove' else ordinal,now(),book_id))
+            c.execute("UPDATE review_queue SET resolved=1 WHERE book_id=? AND field IN ('series','series_index')",(book_id,))
+            c.commit()
+        return go(f'/series/{series_id}')
+
     @app.post('/series/new')
     def create_series(csrf:str=Form(...),name:str=Form(...)):
         guard(csrf);name=name.strip()
         if not name or len(name)>250:raise HTTPException(422)
         with db() as c:
             c.execute('INSERT OR IGNORE INTO series_catalog(name,updated_at) VALUES(?,?)',(name,now()));c.commit()
-        return go('/series')
+            row=c.execute('SELECT id FROM series_catalog WHERE name=? COLLATE NOCASE',(name,)).fetchone()
+        return go(f'/series/{row["id"]}')
     @app.post('/book/{book_id}/series')
     def assign_series(book_id:int,csrf:str=Form(...),series:str=Form(''),index:str=Form('')):
         guard(csrf);series=series.strip()
@@ -350,7 +391,7 @@ def create_app(db_path):
         with db() as c:
             if not c.execute('SELECT 1 FROM books WHERE id=?',(book_id,)).fetchone():raise HTTPException(404)
             if series:c.execute('INSERT OR IGNORE INTO series_catalog(name,updated_at) VALUES(?,?)',(series,now()))
-            c.execute('UPDATE books SET series=?,series_index=?,updated_at=? WHERE id=?',(series or None,ordinal,now(),book_id))
+            c.execute('UPDATE books SET series=?,series_index=?,manually_verified=1,updated_at=? WHERE id=?',(series or None,ordinal,now(),book_id))
             c.execute("UPDATE review_queue SET resolved=1 WHERE book_id=? AND field IN ('series','series_index')",(book_id,))
             c.commit()
         return go(f'/book/{book_id}')
@@ -365,7 +406,7 @@ def create_app(db_path):
             if collision:raise HTTPException(409,'Another series already uses this name')
             c.execute('UPDATE books SET series=?,updated_at=? WHERE series=? COLLATE NOCASE',(name,now(),old['name']))
             c.execute('UPDATE series_catalog SET name=?,description=?,notes=?,updated_at=? WHERE id=?',(name,description,notes,now(),series_id));c.commit()
-        return go('/series')
+        return go(f'/series/{series_id}')
     @app.get('/duplicates',response_class=HTMLResponse)
     def duplicates():
         with db() as c:

@@ -123,3 +123,7 @@ The series algorithm is still deterministic and intentionally conservative: file
 - Books can be hidden from the default catalog using the book-detail action, then found through Library → visibility → Hidden books only (or All books). Hidden books are retained in SQLite and available to exports, reviews and direct links.
 - Shared UI spacing, responsive filters, navigation and focus styles have been revised.
 - Existing SQLite databases migrate automatically with a new `books.hidden` field. Back up your database before upgrading.
+
+## v0.7 — redesigned series workspace
+
+The `/series` page is a visual collection browser with cover stacks, progress indicators, search, sorting, and filters (including missing volume order). Open a series to arrange volume numbers, add matching or searched books, remove assignments, and edit its title/description/private notes. All operations are manual and leave ebook files untouched. Existing SQLite data migrates without a new schema change. There is no automatic bulk-merging in this release; uncertain matches must be confirmed.
