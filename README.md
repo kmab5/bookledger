@@ -127,3 +127,12 @@ The series algorithm is still deterministic and intentionally conservative: file
 ## v0.7 — redesigned series workspace
 
 The `/series` page is a visual collection browser with cover stacks, progress indicators, search, sorting, and filters (including missing volume order). Open a series to arrange volume numbers, add matching or searched books, remove assignments, and edit its title/description/private notes. All operations are manual and leave ebook files untouched. Existing SQLite data migrates without a new schema change. There is no automatic bulk-merging in this release; uncertain matches must be confirmed.
+
+## v0.8: quick sort, series deletion, controlled enrichment
+
+- `/quick-sort` supports left/right/up/down swipe or arrow keys. Left marks **not read**, right marks **finished**, up skips this item for the current session, and down opens the details page. Buttons provide accessible alternatives. Default queue shows unanswered, visible books; filters include series and category. A single pass shows up to 300 books; revisit the queue for the next batch. Classifications save immediately.
+- In `/series/{id}` open **series settings** and choose **delete series**. This unassigns member books, but preserves their book records, reading histories, and source files. This action is not reversible; back up SQLite first.
+- `/enrich` now supports 1–10,000 book batches, mode selection (missing fields / missing covers / all), start-after book ID, a cancellation request, progress, and per-item failures. The latest processed ID is exposed so the next batch can resume. Set the ID back to 0 to repeat the library. A running job and its current progress are in server memory, not a durable job history; restarting the app clears that state.
+- Online enrichment remains a best-effort Open Library lookup and only fills blank fields. It never changes reading status or overwrites manually filled metadata. A job already in progress must complete or stop before another starts.
+
+Run `python -m pytest` after installing dependencies. This release adds no authentication.

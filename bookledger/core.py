@@ -360,29 +360,42 @@ def folder_hints(path, root):
     ignored={'books','ebooks','library','files','download','downloads','pdf','epub','mobi','azw3','read','unread','authors','series','fiction','nonfiction','non-fiction'}
     return [clean(p) for p in parts if norm(p) and p.casefold() not in ignored and not p.startswith('.')]
 
-def enrich_existing(db, progress=None):
-    rows=db.execute('SELECT * FROM books ORDER BY id').fetchall()
-    results={'examined':0,'enriched':0,'covers':0,'errors':0}
+def enrich_existing(db, progress=None, *, start_after=0, limit=None, mode='missing', stop=None):
+    if mode not in ('missing','covers','all'): raise ValueError('Unknown enrichment mode')
+    if limit is not None and (limit<1 or limit>10000):raise ValueError('Limit must be 1–10000')
+    sql='SELECT * FROM books WHERE id>? ORDER BY id'
+    args=[start_after]
+    if limit is not None:sql+=' LIMIT ?';args.append(limit)
+    rows=db.execute(sql,args).fetchall()
+    results={'examined':0,'enriched':0,'covers':0,'errors':0,'last_id':start_after,'failures':[],'cancelled':False}
     for b in rows:
+        if stop is not None and stop():
+            results['cancelled']=True;break
+        results['last_id']=b['id']
         results['examined']+=1
         if progress: progress({'processed':results['examined'],'total':len(rows),'title':b['title']})
         try:
+            if mode=='covers' and b['cover_path']:continue
+            if mode=='missing' and b['cover_path'] and all(b[k] for k in ('isbn13','language','publisher','published','description')):continue
             data={'title':b['title'],'authors':jsonarr(b['authors']),'isbn10':b['isbn10'],'isbn13':b['isbn13']}
             online,_=enrich(db,data,True)
             allowed=('isbn10','isbn13','language','publisher','published','description','subjects','page_count','page_count_kind','cover_url')
-            updates={k:v for k,v in online.items() if k in allowed and k in b.keys() and v and not b[k]}
+            updates={k:v for k,v in online.items() if mode!='covers' and k in allowed and k in b.keys() and v and not b[k]}
             if updates:
                 if 'subjects' in updates:updates['subjects']=json.dumps(updates['subjects'])
                 db.execute('UPDATE books SET '+','.join(k+'=?' for k in updates)+',updated_at=? WHERE id=?',(*updates.values(),now(),b['id']))
                 results['enriched']+=1
             f=db.execute('SELECT path FROM files WHERE book_id=? AND missing=0 LIMIT 1',(b['id'],)).fetchone()
-            cover=cache_cover(db,b['id'],path=f['path'] if f else None,url=online.get('cover_url') or b['cover_url'])
+            cover=cache_cover(db,b['id'],path=f['path'] if f else None,url=online.get('cover_url') or b['cover_url']) if not b['cover_path'] else None
             if cover:results['covers']+=1
             db.commit()
+            if progress:progress({'processed':results['examined'],'total':len(rows),'title':b['title'],'last_id':b['id'],'result':dict(results)})
         except Exception as exc:
             results['errors']+=1
             if progress: progress({'processed':results['examined'],'total':len(rows),'title':b['title'],'last_error':f'{type(exc).__name__}: {exc}','errors':results['errors']})
             db.rollback()
+            if len(results['failures'])<100:results['failures'].append({'id':b['id'],'title':b['title'],'error':f'{type(exc).__name__}: {exc}'})
+            if progress:progress({'processed':results['examined'],'total':len(rows),'title':b['title'],'last_id':b['id'],'result':dict(results)})
     return results
 
 def scan(db, root, online=True, progress=None):

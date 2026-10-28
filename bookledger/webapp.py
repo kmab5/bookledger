@@ -12,7 +12,7 @@ LABELS={'unanswered':'Not answered','not_read':'Not read','want_to_read':'Want t
 CSS=Path(__file__).with_name('ui.css').read_text(encoding='utf-8')
 def h(s):return html.escape(str(s if s is not None else ''),quote=True)
 def layout(title,body):
-    links=[('/', 'library'),('/scan','scan'),('/review','review'),('/reading','reading'),('/series','series'),('/duplicates','editions'),('/stats','statistics'),('/enrich','enrich'),('/exports','exports')]
+    links=[('/', 'library'),('/scan','scan'),('/review','review'),('/reading','reading'),('/quick-sort','quick sort'),('/series','series'),('/duplicates','editions'),('/stats','statistics'),('/enrich','enrich'),('/exports','exports')]
     nav=''.join(f'<a href="{url}">{label}</a>' for url,label in links)
     return HTMLResponse(f'''<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="theme-color" content="#0E0E11"><link rel="icon" type="image/svg+xml" href="/favicon.svg"><title>{h(title).lower()} · bookledger</title><style>{CSS}</style></head><body><a class="skip-link" href="#main-content">skip to content</a><header><a href="/"><strong>bookledger</strong></a><nav>{nav}</nav></header><main id="main-content">{body}</main></body></html>''')
 def safe_date(v):
@@ -102,30 +102,40 @@ def create_app(db_path):
         threading.Thread(target=worker,daemon=True,name='bookledger-scan').start()
         return go('/scan')
 
-    app.state.enrich_job={'status':'idle','processed':0,'total':0,'title':'','result':{}}
+    app.state.enrich_job={'status':'idle','processed':0,'total':0,'title':'','result':{},'last_id':0}
     app.state.enrich_lock=threading.Lock()
+    app.state.enrich_cancel=threading.Event()
     @app.get('/enrich')
     def enrich_page():
-        return layout('enrichment',f'''<div class="section-head">metadata / online lookup</div><h1>enrich library.</h1><p class="hero-sub">Look up incomplete records in Open Library and cache available covers. Existing reading records remain untouched.</p><section class="panel"><form method="post" action="/enrich">{token()}<button>start online enrichment</button></form><p class="muted">Only blank metadata fields are filled. The library must have internet access.</p></section><section class="panel"><h2>progress</h2><div id="enrich-status"></div></section><script>async function update(){{try{{const r=await fetch('/enrich/status');const j=await r.json();document.getElementById('enrich-status').textContent=`${{j.status}} · ${{j.processed}} / ${{j.total}} · ${{j.title||''}} · ${{JSON.stringify(j.result||{{}})}}`}}catch(e){{}}}}update();setInterval(update,1300)</script>''')
+        with app.state.enrich_lock: state=dict(app.state.enrich_job)
+        next_id=state.get('last_id',0)
+        return layout('enrichment',f'''<div class="section-head">catalog / external metadata</div><h1>enrichment.</h1><p class="hero-sub">Run controlled batches. Keep manual edits and reading data intact. Open Library may be slow or incomplete.</p><div class="enrich-columns"><section class="panel"><h2>new pass</h2><form method="post" action="/enrich">{token()}<label>mode<select name="mode"><option value="missing">fill incomplete metadata</option><option value="covers">fetch missing covers</option><option value="all">check every record (fill blanks only)</option></select></label><label>maximum books per pass<input type="number" name="limit" value="100" min="1" max="10000" required></label><label>start after book ID<input type="number" name="start_after" value="{int(next_id)}" min="0"></label><button>start batch</button></form><form method="post" action="/enrich/cancel">{token()}<button class="ghost">stop after current book</button></form><p class="muted">To restart at the beginning, set the starting ID to 0. Repeated passes never overwrite existing non-empty fields.</p></section><section class="panel"><h2>live results</h2><div id="enrich-status" role="status" aria-live="polite">loading…</div><progress id="enrich-progress" value="0" max="100" style="width:100%"></progress><h3>recent failures</h3><ul id="enrich-errors" class="enrich-errors"></ul></section></div><script>
+async function poll(){{try{{const r=await fetch('/enrich/status',{{cache:'no-store'}});if(!r.ok)return;const j=await r.json();const result=j.result||{{}};document.getElementById('enrich-status').textContent=`${{j.status}} · ${{j.processed||0}} / ${{j.total||0}} · book #${{j.last_id||0}} · ${{j.title||''}} · updated ${{result.enriched||0}} · covers ${{result.covers||0}} · errors ${{result.errors||0}}`;const p=document.getElementById('enrich-progress');p.max=Math.max(1,j.total||1);p.value=j.processed||0;document.getElementById('enrich-errors').replaceChildren(...(result.failures||[]).slice(-12).map(x=>{{const li=document.createElement('li');li.textContent='#'+x.id+' '+x.title+': '+x.error;return li}}))}}catch(e){{}}}}poll();setInterval(poll,1600);
+</script>''')
     @app.get('/enrich/status')
     def enrichment_status():
         with app.state.enrich_lock:return dict(app.state.enrich_job)
+    @app.post('/enrich/cancel')
+    def stop_enrich(csrf:str=Form(...)):
+        guard(csrf);app.state.enrich_cancel.set();return go('/enrich')
     @app.post('/enrich')
-    def start_enrich(csrf:str=Form(...)):
+    def start_enrich(csrf:str=Form(...),mode:str=Form('missing'),limit:int=Form(100),start_after:int=Form(0)):
         guard(csrf)
+        if mode not in ('missing','covers','all') or not 1<=limit<=10000 or start_after<0:raise HTTPException(422,'Invalid batch settings')
         with app.state.enrich_lock:
             if app.state.enrich_job['status']=='running':raise HTTPException(409,'Enrichment already running')
-            with db() as c: count=c.execute('SELECT COUNT(*) FROM books').fetchone()[0]
-            app.state.enrich_job={'status':'running','processed':0,'total':count,'title':'','result':{}}
+            with db() as c: count=c.execute('SELECT COUNT(*) FROM (SELECT id FROM books WHERE id>? ORDER BY id LIMIT ?)',(start_after,limit)).fetchone()[0]
+            app.state.enrich_job={'status':'running','processed':0,'total':count,'title':'','result':{},'last_id':start_after}
+            app.state.enrich_cancel.clear()
         def update(event):
             with app.state.enrich_lock:app.state.enrich_job.update(event)
         def worker():
             try:
-                with db() as c:result=enrich_existing(c,update)
-                with app.state.enrich_lock:app.state.enrich_job.update(status='completed',result=result)
+                with db() as c:result=enrich_existing(c,update,start_after=start_after,limit=limit,mode=mode,stop=app.state.enrich_cancel.is_set)
+                with app.state.enrich_lock:app.state.enrich_job.update(status='cancelled' if result['cancelled'] else 'completed',result=result,last_id=result['last_id'])
             except Exception as exc:
-                with app.state.enrich_lock:app.state.enrich_job.update(status='failed',result={'error':str(exc)})
-        threading.Thread(target=worker,daemon=True).start();return go('/enrich')
+                with app.state.enrich_lock:app.state.enrich_job.update(status='failed',result={'error':f'{type(exc).__name__}: {exc}'})
+        threading.Thread(target=worker,daemon=True,name='bookledger-enrichment').start();return go('/enrich')
 
     @app.get('/exports')
     def exports_page(template:str='full'):
@@ -317,6 +327,36 @@ def create_app(db_path):
         with db() as c:
             c.execute('UPDATE reading SET status=?,updated_at=? WHERE book_id=?',(status,now(),book_id));c.commit()
         return go('/reading')
+    @app.get('/quick-sort',response_class=HTMLResponse)
+    def quick_sort(scope:str='unanswered',series:str='',category:str=''):
+        if scope not in ('unanswered','all','unread'):raise HTTPException(422,'Invalid scope')
+        with db() as c:
+            where=['COALESCE(b.hidden,0)=0'];args=[]
+            if scope=='unanswered':where.append("COALESCE(r.status,'unanswered')='unanswered'")
+            if scope=='unread':where.append("COALESCE(r.status,'unanswered') IN ('unanswered','not_read','want_to_read')")
+            if series:where.append('b.series=?');args.append(series)
+            if category:
+                where.append('EXISTS(SELECT 1 FROM book_categories bc JOIN categories cat ON cat.id=bc.category_id WHERE bc.book_id=b.id AND cat.name=?)');args.append(category)
+            books=c.execute('SELECT b.id,b.title,b.authors,b.series,b.description,COALESCE(r.status,"unanswered") AS status FROM books b LEFT JOIN reading r ON r.book_id=b.id WHERE '+ ' AND '.join(where)+' ORDER BY b.id LIMIT 300',args).fetchall()
+            series_options=[x[0] for x in c.execute('SELECT DISTINCT series FROM books WHERE series IS NOT NULL AND series<>"" ORDER BY series')]
+            cats=[x[0] for x in c.execute('SELECT name FROM categories ORDER BY name')]
+        data=[dict(x) for x in books]
+        options=lambda values,chosen:''.join(f'<option value="{h(x)}" {"selected" if x==chosen else ""}>{h(x)}</option>' for x in values)
+        controls=f'''<form method="get" class="qs-filters"><label>queue<select name="scope">{options(['unanswered','unread','all'],scope)}</select></label><label>series<select name="series"><option value="">all series</option>{options(series_options,series)}</select></label><label>category<select name="category"><option value="">all categories</option>{options(cats,category)}</select></label><button>apply</button></form>'''
+        client=json.dumps(data).replace('<','\\u003c')
+        return layout('quick sort',f'''<div class="section-head">reading / triage</div><h1>quick sort.</h1><p class="hero-sub">right → finished. left → not read. up → skip. down → details. arrow keys work too.</p>{controls}<section class="qs-shell" aria-label="quick sort"><div class="qs-count" id="qs-count" aria-live="polite"></div><div class="qs-card" id="qs-card" tabindex="0" aria-label="book to classify"><div class="qs-cover"><img id="qs-cover" alt="book cover"></div><div class="qs-info"><span class="qs-kicker" id="qs-series"></span><h2 id="qs-title"></h2><p id="qs-author"></p><p id="qs-description"></p></div></div><p id="qs-message" role="status" aria-live="polite"></p><div class="qs-actions"><button type="button" id="qs-no" class="qs-no" aria-label="not read, left arrow">← not read</button><button type="button" id="qs-skip" class="ghost" aria-label="skip, up arrow">↑ skip</button><button type="button" id="qs-detail" class="ghost" aria-label="details, down arrow">↓ details</button><button type="button" id="qs-yes" class="qs-yes" aria-label="finished, right arrow">read →</button></div></section><script>
+(()=>{{'use strict';const books={client};const csrf={json.dumps(app.state.csrf)};let i=0,busy=false,start=null;const el=id=>document.getElementById(id);const card=el('qs-card');function render(){{if(i>=books.length){{card.hidden=true;el('qs-message').textContent='queue complete. choose another filter to continue.';el('qs-count').textContent=`${{books.length}} / ${{books.length}}`;return}}const b=books[i];card.hidden=false;el('qs-count').textContent=`${{i+1}} / ${{books.length}}`;el('qs-cover').src='/cover/'+b.id;el('qs-cover').alt='cover for '+b.title;el('qs-title').textContent=b.title;let authors=b.authors;try{{authors=JSON.parse(authors).join(', ')}}catch(e){{}}el('qs-author').textContent=authors||'unknown author';el('qs-series').textContent=b.series||'standalone / unknown series';el('qs-description').textContent=(b.description||'').slice(0,270);el('qs-message').textContent='';card.focus({{preventScroll:true}})}}async function act(action){{if(busy||i>=books.length)return;const b=books[i];if(action==='detail'){{location.href='/book/'+b.id;return}}if(action==='skip'){{i++;render();return}}busy=true;try{{const body=new URLSearchParams({{csrf,status:action}});const r=await fetch('/quick-sort/'+b.id,{{method:'POST',body,headers:{{'Accept':'application/json'}}}});if(!r.ok)throw Error(await r.text());i++;render()}}catch(e){{el('qs-message').textContent='could not save: '+e.message}}finally{{busy=false}}}}el('qs-no').onclick=()=>act('not_read');el('qs-yes').onclick=()=>act('finished');el('qs-skip').onclick=()=>act('skip');el('qs-detail').onclick=()=>act('detail');document.addEventListener('keydown',e=>{{if(['INPUT','SELECT','TEXTAREA','BUTTON'].includes(document.activeElement.tagName))return;const keys={{ArrowLeft:'not_read',ArrowRight:'finished',ArrowUp:'skip',ArrowDown:'detail'}};if(keys[e.key]){{e.preventDefault();act(keys[e.key])}}}});card.addEventListener('touchstart',e=>{{if(e.touches.length===1)start={{x:e.touches[0].clientX,y:e.touches[0].clientY}}}},{{passive:true}});card.addEventListener('touchend',e=>{{if(!start)return;const dx=e.changedTouches[0].clientX-start.x,dy=e.changedTouches[0].clientY-start.y;start=null;if(Math.max(Math.abs(dx),Math.abs(dy))<65)return;act(Math.abs(dx)>Math.abs(dy)?(dx>0?'finished':'not_read'):(dy<0?'skip':'detail'))}},{{passive:true}});render()}})();</script>''')
+    @app.post('/quick-sort/{book_id}')
+    def quick_sort_status(book_id:int,csrf:str=Form(...),status:str=Form(...)):
+        guard(csrf)
+        if status not in ('finished','not_read'):raise HTTPException(422,'Unsupported quick sort status')
+        with db() as c:
+            found=c.execute('SELECT id FROM books WHERE id=? AND COALESCE(hidden,0)=0',(book_id,)).fetchone()
+            if not found:raise HTTPException(404)
+            c.execute('INSERT INTO reading(book_id,status,updated_at) VALUES(?,?,?) ON CONFLICT(book_id) DO UPDATE SET status=excluded.status,updated_at=excluded.updated_at',(book_id,status,now()))
+            c.commit()
+        return JSONResponse({'ok':True,'book_id':book_id,'status':status})
+
     # Series workspace: discovery is separate from editing. All changes are explicit.
     @app.get('/series',response_class=HTMLResponse)
     def series_index(q:str='',sort:str='name',view:str='grid',state:str='all'):
@@ -353,7 +393,7 @@ def create_app(db_path):
             status=LABELS.get(b['status'],'not answered')
             return f'''<div class="series-volume"><a href="/book/{b['id']}" class="series-volume-cover"><img src="/cover/{b['id']}" loading="lazy" alt="cover of {h(b['title'])}" onerror="this.style.display='none'"></a><div class="series-volume-info"><a href="/book/{b['id']}"><strong>{h(b['title'])}</strong></a><span>{h(', '.join(jsonarr(b['authors'])))} · {h(status)}</span></div><form method="post" action="/series/{series_id}/member/{b['id']}" class="series-inline-edit">{token()}<label>volume<input type="number" step="any" min="0" name="index" value="{h(b['series_index'])}" aria-label="volume number for {h(b['title'])}"></label><button name="action" value="save">save</button><button class="ghost" name="action" value="remove" aria-label="remove {h(b['title'])} from series">remove</button></form></div>'''
         def add_row(b):return f'<form class="series-candidate" method="post" action="/series/{series_id}/member/{b["id"]}">{token()}<div><strong>{h(b["title"])}</strong><span>{h(", ".join(jsonarr(b["authors"])))}</span></div><input type="hidden" name="index" value=""><button name="action" value="add">+ add</button></form>'
-        edit=f'''<details class="series-settings"><summary>series settings</summary><form method="post" action="/series/{series_id}">{token()}<label>series name<input name="name" maxlength="250" required value="{h(item['name'])}"></label><label>description<textarea name="description" rows="3">{h(item['description'] or '')}</textarea></label><label>private notes<textarea name="notes" rows="3">{h(item['notes'] or '')}</textarea></label><button>save details</button></form></details>'''
+        edit=f'''<details class="series-settings"><summary>series settings</summary><form method="post" action="/series/{series_id}">{token()}<label>series name<input name="name" maxlength="250" required value="{h(item['name'])}"></label><label>description<textarea name="description" rows="3">{h(item['description'] or '')}</textarea></label><label>private notes<textarea name="notes" rows="3">{h(item['notes'] or '')}</textarea></label><button>save details</button></form><form method="post" action="/series/{series_id}/delete" onsubmit="return confirm('Delete this series? Books will be kept and unassigned.');">{token()}<button class="danger" type="submit">delete series</button></form></details>'''
         candidates=f'''<section class="series-side-panel"><h2>add books</h2><p class="muted">Search your whole library, or choose one of the possible matches below. Nothing is assigned automatically.</p><form method="get" action="/series/{series_id}"><label>find by title<input name="q" value="{h(q)}" placeholder="search a title…"></label><button>search library</button></form><div class="series-candidates">{''.join(add_row(b) for b in searches or unassigned) or '<p class="muted">No candidates found.</p>'}</div></section>'''
         return layout(item['name'],f'''<div class="series-breadcrumb"><a href="/series">← all series</a></div><div class="series-detail-head"><div><div class="section-head">series / organize</div><h1>{h(item['name'])}</h1><p class="muted">{count} books · {done} finished · {count-done} remaining</p></div>{edit}</div><div class="series-workspace"><section class="series-main"><div class="series-section-top"><div><h2>reading order</h2><p class="muted">Set the volume number to organize your collection. Changes save per book.</p></div></div><div class="series-volumes">{''.join(row(b) for b in members) or '<div class="series-empty-state">No books assigned yet. Add books from the right.</div>'}</div></section>{candidates}</div>''')
 
@@ -395,6 +435,15 @@ def create_app(db_path):
             c.execute("UPDATE review_queue SET resolved=1 WHERE book_id=? AND field IN ('series','series_index')",(book_id,))
             c.commit()
         return go(f'/book/{book_id}')
+    @app.post('/series/{series_id}/delete')
+    def delete_series(series_id:int,csrf:str=Form(...)):
+        guard(csrf)
+        with db() as c:
+            entry=c.execute('SELECT name FROM series_catalog WHERE id=?',(series_id,)).fetchone()
+            if not entry:raise HTTPException(404)
+            c.execute('UPDATE books SET series=NULL,series_index=NULL,manually_verified=1,updated_at=? WHERE series=? COLLATE NOCASE',(now(),entry['name']))
+            c.execute('DELETE FROM series_catalog WHERE id=?',(series_id,));c.commit()
+        return go('/series')
     @app.post('/series/{series_id}')
     def update_series(series_id:int,csrf:str=Form(...),name:str=Form(...),description:str=Form(''),notes:str=Form('')):
         guard(csrf);name=name.strip()
