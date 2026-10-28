@@ -144,3 +144,15 @@ Run `python -m pytest` after installing dependencies. This release adds no authe
 - **Statistics**: a rebuilt `/stats` dashboard shows reading classification, progress, reading time, formats, covers, metadata-review backlog, series coverage, recorded finish dates and the largest series. Counts are derived from the existing SQLite database.
 - **Series context menus**: right-click a series card or book row; touch-and-hold, or use the keyboard Context Menu key / Shift+F10. Available actions depend on whether the target is a series, a current member, or a candidate. Deleting a series clears assignments, not books.
 - No schema changes are required. Backup your SQLite database before updating.
+
+## v1.0 — contextual menus across the web application
+
+Right-click an item or an empty area within an application page, use the keyboard
+Context Menu key or Shift+F10, or long-press on a touchscreen. Book cards offer
+reading-status shortcuts, visibility controls, and direct links; other pages have
+relevant navigation and copy-link actions. Series entries continue to use their
+existing specialized edit/remove/delete menus.
+
+The menu avoids editable form controls so native text selection and editing remain
+available. The action menu is keyboard navigable (Up/Down/Home/End, Escape) and
+follows the kmab dark theme. No database migration or ebook changes are needed.
