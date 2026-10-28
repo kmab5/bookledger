@@ -1,6 +1,6 @@
 """Metadata-only ingest. Never writes to books or moves them."""
 from __future__ import annotations
-import hashlib, json, os, re, sqlite3, time, urllib.parse, urllib.request, zipfile, subprocess, shutil
+import hashlib, json, os, re, sqlite3, time, urllib.parse, urllib.request, zipfile, subprocess, shutil, mimetypes
 from datetime import datetime, timezone
 from pathlib import Path
 from difflib import SequenceMatcher
@@ -61,6 +61,8 @@ def connect(path: str | Path):
     db.executescript(SCHEMA)
     if 'content_sha256' not in {row[1] for row in db.execute('PRAGMA table_info(files)')}:
         db.execute('ALTER TABLE files ADD COLUMN content_sha256 TEXT')
+    if 'cover_path' not in {row[1] for row in db.execute('PRAGMA table_info(books)')}:
+        db.execute('ALTER TABLE books ADD COLUMN cover_path TEXT')
     db.execute('CREATE INDEX IF NOT EXISTS idx_files_sha256 ON files(content_sha256)')
     db.commit()
     return db
@@ -284,6 +286,81 @@ def potential_related(db, book_id, data):
             a,b=sorted((book_id,candidate['id']))
             db.execute('INSERT OR IGNORE INTO book_links(book_id,candidate_id,kind,confidence) VALUES(?,?,?,?)',(a,b,'possible_edition',min(.99,round(title_sim*.96,3))))
 
+
+# Covers are metadata assets; original ebooks are always read-only.
+def cache_cover(db, book_id, path=None, url=None, download=True):
+    base = Path(db.execute('PRAGMA database_list').fetchone()[2]).resolve().parent / 'covers'
+    base.mkdir(parents=True, exist_ok=True)
+    dest=base / f'{book_id}.jpg'
+    if dest.exists() and dest.stat().st_size: return str(dest)
+    data=None
+    if path is not None:
+        try:
+            ext=Path(path).suffix.lower()
+            if ext=='.cbz':
+                with zipfile.ZipFile(path) as z:
+                    names=sorted(n for n in z.namelist() if n.lower().endswith(('.jpg','.jpeg','.png','.webp')) and not n.endswith('/'))
+                    if names: data=z.read(names[0])
+            if ext=='.epub':
+                with zipfile.ZipFile(path) as z:
+                    container=ET.fromstring(z.read('META-INF/container.xml'))
+                    opf=next(x.attrib['full-path'] for x in container.iter() if x.tag.endswith('rootfile'))
+                    root=ET.fromstring(z.read(opf)); basedir=Path(opf).parent
+                    manifest=next((x for x in root if x.tag.endswith('manifest')),None)
+                    items=list(manifest) if manifest is not None else []
+                    candidates=[x for x in items if 'cover-image' in x.attrib.get('properties','').split()]
+                    if not candidates:
+                        metadata=next((x for x in root if x.tag.endswith('metadata')),None)
+                        refs=[x.attrib.get('content') for x in metadata if x.tag.endswith('meta') and x.attrib.get('name')=='cover'] if metadata is not None else []
+                        candidates=[x for x in items if x.attrib.get('id') in refs]
+                    if not candidates: candidates=[x for x in items if 'cover' in x.attrib.get('id','').lower() and x.attrib.get('media-type','').startswith('image/')]
+                    if candidates:
+                        member=(basedir / urllib.parse.unquote(candidates[0].attrib['href'])).as_posix()
+                        if member in z.namelist():data=z.read(member)
+        except (OSError,KeyError,ValueError,StopIteration,zipfile.BadZipFile,ET.ParseError):pass
+    if data is None and url and download and url.startswith('https://'):
+        try:
+            req=urllib.request.Request(url,headers={'User-Agent':'BookLedger/0.4'})
+            with urllib.request.urlopen(req,timeout=9) as response:
+                if response.headers.get('Content-Type','').startswith('image/'):
+                    data=response.read(4_000_001)
+        except (OSError,ValueError):pass
+    if not data or len(data)>4_000_000: return None
+    try:
+        from PIL import Image,ImageOps
+        import io
+        with Image.open(io.BytesIO(data)) as img:
+            img=ImageOps.exif_transpose(img).convert('RGB');img.thumbnail((460,700));img.save(dest,format='JPEG',quality=84,optimize=True)
+        db.execute('UPDATE books SET cover_path=? WHERE id=?',(str(dest),book_id));db.commit();return str(dest)
+    except (ImportError,OSError,ValueError):return None
+
+def folder_hints(path, root):
+    try: parts=path.relative_to(root).parts[:-1]
+    except ValueError:return []
+    ignored={'books','ebooks','library','files','download','downloads','pdf','epub','mobi','azw3','read','unread','authors','series','fiction','nonfiction','non-fiction'}
+    return [clean(p) for p in parts if norm(p) and p.casefold() not in ignored and not p.startswith('.')]
+
+def enrich_existing(db, progress=None):
+    rows=db.execute('SELECT id,title,authors,isbn10,isbn13,cover_url,cover_path FROM books ORDER BY id').fetchall()
+    results={'examined':0,'enriched':0,'covers':0,'errors':0}
+    for b in rows:
+        results['examined']+=1
+        if progress: progress({'processed':results['examined'],'total':len(rows),'title':b['title']})
+        try:
+            data={'title':b['title'],'authors':jsonarr(b['authors']),'isbn10':b['isbn10'],'isbn13':b['isbn13']}
+            online,_=enrich(db,data,True)
+            updates={k:v for k,v in online.items() if k in ('isbn10','isbn13','language','publisher','published','description','subjects','page_count','page_count_kind','cover_url') and v and not b[k] if k in b.keys()}
+            if updates:
+                if 'subjects' in updates:updates['subjects']=json.dumps(updates['subjects'])
+                db.execute('UPDATE books SET '+','.join(k+'=?' for k in updates)+',updated_at=? WHERE id=?',(*updates.values(),now(),b['id']))
+                results['enriched']+=1
+            f=db.execute('SELECT path FROM files WHERE book_id=? AND missing=0 LIMIT 1',(b['id'],)).fetchone()
+            cover=cache_cover(db,b['id'],path=f['path'] if f else None,url=online.get('cover_url') or b['cover_url'])
+            if cover:results['covers']+=1
+            db.commit()
+        except (OSError,ValueError,sqlite3.Error):results['errors']+=1
+    return results
+
 def scan(db, root, online=True, progress=None):
     root=Path(root).expanduser().resolve()
     if not root.is_dir(): raise ValueError(f'Not a folder: {root}')
@@ -309,9 +386,18 @@ def scan(db, root, online=True, progress=None):
                     db.execute('UPDATE files SET last_seen=?,missing=0 WHERE id=?',(started,old['id'])); totals['unchanged']+=1; emit('file_done', path=str(path), outcome='unchanged', processed=processed, **totals); continue
                 emit('stage', path=str(path), stage='extracting metadata', processed=processed)
                 guessed=parse_name(path); embedded, raw, err=extract(path)
+                hints=folder_hints(path,root)
+                if hints:raw['folder_hints']=hints
+                if not guessed.get('series') and hints:
+                    # A directory can suggest a series, but never assert it as fact.
+                    series_hint=next((x for x in reversed(hints) if re.search(r'(?:series|saga|trilogy|cycle|volume)',x,re.I)),None)
+                    if series_hint:
+                        guessed['series']=re.sub(r'\s*(series|saga|trilogy|cycle)\s*$','',series_hint,flags=re.I).strip() or series_hint
                 emit('stage', path=str(path), stage='computing hash', processed=processed)
                 digest=file_sha256(path)
                 data={**guessed}; sources={k:'filename' for k,v in guessed.items() if v}; scores={k:.55 for k in sources}
+                if guessed.get('series') and raw.get('folder_hints') and 'series' in sources:
+                    sources['series']='folder';scores['series']=.48
                 for k,v in embedded.items():
                     if v not in (None,'',[]): data[k]=v; sources[k]='embedded'; scores[k]=.95 if k!='series_index' else .92
                 if online: emit('stage', path=str(path), stage='online metadata lookup', processed=processed)
@@ -355,7 +441,9 @@ def scan(db, root, online=True, progress=None):
                     for field in ('title','authors','series','series_index'):
                         if data.get(field) and scores.get(field,0)<.8:
                             db.execute('INSERT OR REPLACE INTO review_queue(book_id,field,suggested,confidence,reason) VALUES(?,?,?,?,?)',(book_id,field,json.dumps(data[field]),scores[field],f'Inferred from {sources[field]}; verify before accepting'))
-                    for genre,score,source in classify(data):
+                    categories=list(classify(data))
+                    categories += [(hint,.48,'folder') for hint in raw.get('folder_hints',[]) if hint and len(hint)<=80]
+                    for genre,score,source in categories:
                         db.execute('INSERT OR IGNORE INTO categories(name) VALUES(?)',(genre,))
                         category=db.execute('SELECT id FROM categories WHERE name=?',(genre,)).fetchone()['id']
                         db.execute('INSERT INTO book_categories(book_id,category_id,confidence,source) VALUES(?,?,?,?) ON CONFLICT(book_id,category_id) DO UPDATE SET confidence=excluded.confidence,source=excluded.source WHERE confirmed=0',(book_id,category,score,source))
@@ -365,6 +453,9 @@ def scan(db, root, online=True, progress=None):
                 else:
                     db.execute('INSERT INTO files(book_id,path,extension,bytes,modified_ns,created_ns,fingerprint,last_seen,extract_error,extra_json,content_sha256) VALUES(?,?,?,?,?,?,?,?,?,?,?)',(book_id,str(path),path.suffix.lower(),st.st_size,st.st_mtime_ns,getattr(st,'st_birthtime_ns',None) or st.st_ctime_ns,fingerprint,started,err,json.dumps(raw),digest))
                     totals['new']+=1
+                emit('stage', path=str(path), stage='caching cover', processed=processed)
+                if not book or not book['cover_path']:
+                    cache_cover(db,book_id,path=path,url=data.get('cover_url'),download=online)
                 if err: totals['errors']+=1
                 db.commit()
                 emit('file_done', path=str(path), outcome='updated' if old else 'new', warning=err, processed=processed, **totals)

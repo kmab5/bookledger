@@ -2,15 +2,19 @@ from __future__ import annotations
 import html, json, os, secrets, sqlite3, threading, time
 from pathlib import Path
 from fastapi import FastAPI, Form, HTTPException, Query, Request
-from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
-from .core import connect, jsonarr, now, scan
+from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse, FileResponse, Response, StreamingResponse
+from .core import connect, jsonarr, now, scan, enrich_existing, cache_cover
+from .custom_export import FIELDS,TEMPLATES,export_custom
+from .export import export_csv,export_json
 
 STATES=['unanswered','not_read','want_to_read','reading','finished','abandoned','on_hold','rereading']
 LABELS={'unanswered':'Not answered','not_read':'Not read','want_to_read':'Want to read','reading':'Currently reading','finished':'Finished','abandoned':'Started & abandoned','on_hold':'On hold','rereading':'Rereading'}
-CSS='''*{box-sizing:border-box}body{font-family:system-ui,Segoe UI,sans-serif;margin:0;background:#f6f7f9;color:#1c2633}header{background:#16283f;color:white;padding:20px}header a{color:white;margin-right:22px;text-decoration:none}main{max-width:1150px;margin:24px auto;padding:0 16px}.panel{background:white;border:1px solid #e0e6ec;border-radius:14px;padding:20px;margin-bottom:16px;box-shadow:0 3px 14px #172b4410}.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(270px,1fr));gap:12px}.muted{color:#637084;font-size:.91rem}.tag{background:#e7eef7;border-radius:6px;padding:3px 7px;font-size:.8rem;display:inline-block;margin:2px}a{color:#1764ac}label{display:block;font-size:.9rem;margin-top:12px}input,select,textarea{font:inherit;width:100%;padding:9px;border:1px solid #b9c5d0;border-radius:8px;background:white}button{background:#1764ac;color:white;padding:10px 15px;border:0;border-radius:8px;cursor:pointer;margin-top:12px}button.ghost{background:#53647a}.toolbar{display:flex;gap:10px;flex-wrap:wrap}.toolbar>*{flex:1;min-width:150px}.badge{font-size:.78rem;padding:4px 7px;border-radius:8px;background:#f5e8c8}.good{background:#d8f2df}.split{display:grid;grid-template-columns:2fr 1fr;gap:18px}pre{white-space:pre-wrap;word-break:break-all}details{margin-top:12px}@media(max-width:700px){.split{grid-template-columns:1fr}header a{display:inline-block;margin-bottom:10px}}'''
+CSS=Path(__file__).with_name('ui.css').read_text(encoding='utf-8')
 def h(s):return html.escape(str(s if s is not None else ''),quote=True)
 def layout(title,body):
-    return HTMLResponse(f'<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{h(title)} - BookLedger</title><style>{CSS}</style></head><body><header><strong>BookLedger</strong><nav><a href="/">Library</a><a href="/scan">Scan folders</a><a href="/review">Metadata review</a><a href="/reading">Have you read it?</a><a href="/stats">Statistics</a><a href="/series">Series</a><a href="/duplicates">Possible editions</a></nav></header><main>{body}</main></body></html>')
+    links=[('/', 'library'),('/scan','scan'),('/review','review'),('/reading','reading'),('/series','series'),('/duplicates','editions'),('/stats','statistics'),('/enrich','enrich'),('/exports','exports')]
+    nav=''.join(f'<a href="{url}">{label}</a>' for url,label in links)
+    return HTMLResponse(f'''<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="theme-color" content="#0E0E11"><link rel="icon" type="image/svg+xml" href="/favicon.svg"><title>{h(title).lower()} · bookledger</title><style>{CSS}</style></head><body><header><a href="/"><strong>bookledger</strong></a><nav>{nav}</nav></header><main>{body}</main></body></html>''')
 def safe_date(v):
     if not v: return None
     from datetime import date
@@ -20,6 +24,18 @@ def create_app(db_path):
     app=FastAPI(title='BookLedger',docs_url=None,redoc_url=None)
     app.state.db_path=str(Path(db_path).expanduser());app.state.csrf=secrets.token_urlsafe(32)
     def db():return connect(app.state.db_path)
+    @app.get('/favicon.svg')
+    def favicon(): return FileResponse(Path(__file__).with_name('favicon.svg'),media_type='image/svg+xml')
+    @app.get('/cover/{book_id}')
+    def cover(book_id:int):
+        with db() as c:
+            b=c.execute('SELECT cover_path FROM books WHERE id=?',(book_id,)).fetchone()
+        if not b or not b['cover_path']:raise HTTPException(404)
+        path=Path(b['cover_path'])
+        expected=Path(app.state.db_path).resolve().parent/'covers'
+        if not path.resolve().is_relative_to(expected.resolve()) or not path.is_file():raise HTTPException(404)
+        return FileResponse(path,media_type='image/jpeg',headers={'Cache-Control':'private, max-age=3600'})
+
     def token():return f'<input type="hidden" name="csrf" value="{h(app.state.csrf)}">'
     def guard(csrf):
         if not secrets.compare_digest(csrf,app.state.csrf):raise HTTPException(403,'Invalid form token')
@@ -86,6 +102,61 @@ def create_app(db_path):
         threading.Thread(target=worker,daemon=True,name='bookledger-scan').start()
         return go('/scan')
 
+    app.state.enrich_job={'status':'idle','processed':0,'total':0,'title':'','result':{}}
+    app.state.enrich_lock=threading.Lock()
+    @app.get('/enrich')
+    def enrich_page():
+        return layout('enrichment',f'''<div class="section-head">metadata / online lookup</div><h1>enrich library.</h1><p class="hero-sub">Look up incomplete records in Open Library and cache available covers. Existing reading records remain untouched.</p><section class="panel"><form method="post" action="/enrich">{token()}<button>start online enrichment</button></form><p class="muted">Only blank metadata fields are filled. The library must have internet access.</p></section><section class="panel"><h2>progress</h2><div id="enrich-status"></div></section><script>async function update(){{try{{const r=await fetch('/enrich/status');const j=await r.json();document.getElementById('enrich-status').textContent=`${{j.status}} · ${{j.processed}} / ${{j.total}} · ${{j.title||''}} · ${{JSON.stringify(j.result||{{}})}}`}}catch(e){{}}}}update();setInterval(update,1300)</script>''')
+    @app.get('/enrich/status')
+    def enrichment_status():
+        with app.state.enrich_lock:return dict(app.state.enrich_job)
+    @app.post('/enrich')
+    def start_enrich(csrf:str=Form(...)):
+        guard(csrf)
+        with app.state.enrich_lock:
+            if app.state.enrich_job['status']=='running':raise HTTPException(409,'Enrichment already running')
+            with db() as c: count=c.execute('SELECT COUNT(*) FROM books').fetchone()[0]
+            app.state.enrich_job={'status':'running','processed':0,'total':count,'title':'','result':{}}
+        def update(event):
+            with app.state.enrich_lock:app.state.enrich_job.update(event)
+        def worker():
+            try:
+                with db() as c:result=enrich_existing(c,update)
+                with app.state.enrich_lock:app.state.enrich_job.update(status='completed',result=result)
+            except Exception as exc:
+                with app.state.enrich_lock:app.state.enrich_job.update(status='failed',result={'error':str(exc)})
+        threading.Thread(target=worker,daemon=True).start();return go('/enrich')
+
+    @app.get('/exports')
+    def exports_page(template:str='full'):
+        selected=TEMPLATES.get(template,TEMPLATES['full'])
+        with db() as c:
+            cats=[r[0] for r in c.execute('SELECT name FROM categories ORDER BY name')]
+            series=[r[0] for r in c.execute('SELECT DISTINCT series FROM books WHERE series IS NOT NULL ORDER BY series')]
+        options=''.join(f'<option value="{h(n)}" {"selected" if template==n else ""}>{h(n.replace("-"," "))}</option>' for n in TEMPLATES)
+        checks=''.join(f'<label style="display:flex;gap:8px;align-items:center;margin:0;padding:8px 0"><input type="checkbox" name="fields" value="{h(field)}" {"checked" if field in selected else ""}>{h(field.replace("_"," "))}</label>' for field in FIELDS)
+        statuses=''.join(f'<option value="{h(k)}">{h(v)}</option>' for k,v in LABELS.items())
+        cat_options=''.join(f'<option value="{h(v)}">{h(v)}</option>' for v in cats)
+        series_options=''.join(f'<option value="{h(v)}">{h(v)}</option>' for v in series)
+        return layout('exports',f'''<div class="section-head">your data / portability</div><h1>export your library.</h1><p class="hero-sub">Build a spreadsheet with only the fields and books you want. All exports are generated locally.</p><div class="split"><section class="panel"><h2>custom csv</h2><label>starting template</label><select onchange="window.location.href='/exports?template='+encodeURIComponent(this.value)">{options}</select><form method="post" action="/exports/download">{token()}<div class="toolbar"><label>reading status<select name="status"><option value="">all statuses</option>{statuses}</select></label><label>category<select name="category"><option value="">all categories</option>{cat_options}</select></label><label>series<select name="series"><option value="">all series</option>{series_options}</select></label></div><label>search titles or authors<input name="search" placeholder="optional"></label><h3>columns</h3><div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:0 16px">{checks}</div><button>download custom csv</button></form></section><section class="panel"><h2>service templates</h2><p>Goodreads-shaped exports are accepted by StoryGraph. CSV formats for other apps can change, so the reference templates are editable rather than claiming guaranteed compatibility.</p><a class="button" href="/exports/preset/goodreads">goodreads csv</a><p style="margin-top:22px"><a class="button" href="/exports/preset/storygraph">storygraph csv</a></p><p style="margin-top:22px"><a class="button" href="/exports/preset/json">full json backup</a></p><p class="muted" style="margin-top:28px">Bookmory and Hardcover have editable reference column presets. Check the current import mapping in each app before uploading.</p></section></div>''')
+    @app.post('/exports/download')
+    def custom_download(csrf:str=Form(...),fields:list[str]=Form(...),status:str=Form(''),category:str=Form(''),series:str=Form(''),search:str=Form('')):
+        guard(csrf)
+        if len(fields)>len(FIELDS):raise HTTPException(422)
+        with db() as c: data=export_custom(c,fields,status,category,series,search)
+        return Response(data,media_type='text/csv; charset=utf-8',headers={'Content-Disposition':'attachment; filename="bookledger-custom.csv"'})
+    @app.get('/exports/preset/{kind}')
+    def preset(kind:str):
+        if kind not in ('goodreads','storygraph','json'):raise HTTPException(404)
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            output=Path(tmp)/('library.json' if kind=='json' else 'library.csv')
+            with db() as c:
+                if kind=='json':export_json(c,output)
+                else:export_csv(c,output)
+            data=output.read_bytes()
+        return Response(data,media_type='application/json' if kind=='json' else 'text/csv; charset=utf-8',headers={'Content-Disposition':f'attachment; filename="bookledger-{kind}.{ "json" if kind=="json" else "csv"}"'})
+
     @app.get('/',response_class=HTMLResponse)
     def index(q:str='',status:str='',category:str='',series:str='',sort:str='title'):
         with db() as c:
@@ -105,8 +176,8 @@ def create_app(db_path):
             count=c.execute('SELECT COUNT(*) FROM books').fetchone()[0]; pending=c.execute('SELECT COUNT(*) FROM review_queue WHERE resolved=0').fetchone()[0]
         options=lambda opts,current:''.join(f'<option value="{h(v)}" {"selected" if v==current else ""}>{h(n)}</option>' for v,n in opts)
         filters=f'<form method="get" class="panel toolbar"><input name="q" placeholder="Title, author or series" value="{h(q)}"><select name="status">{options([("","Any reading status")]+[(x,LABELS[x]) for x in STATES],status)}</select><select name="category">{options([("","Any category")]+[(x,x) for x in categories],category)}</select><select name="series">{options([("","Any series")]+[(x,x) for x in series_names],series)}</select><select name="sort">{options([("title","Title"),("author","Author"),("date","Recently indexed"),("series","Series order")],sort)}</select><button>Filter</button></form>'
-        cards=''.join(f'<article class="panel"><a href="/book/{b["id"]}"><strong>{h(b["title"])}</strong></a><p class="muted">{h(", ".join(jsonarr(b["authors"])))}</p><p>{h(b["series"] or "")}{" · #"+h(b["series_index"]) if b["series_index"] is not None else ""}</p><span class="tag">{h(LABELS.get(b["status"],"Not answered"))}</span> {"<span class=\"badge\">Needs review</span>" if b["needs_review"] else ""}</article>' for b in rows)
-        return layout('Library',f'<h1>Library</h1><p>{count} titles · {pending} unresolved metadata suggestions · {len(rows)} shown</p>{filters}<section class="grid">{cards or "<p>No books found. Run bookledger scan first.</p>"}</section>')
+        cards=''.join(f'<article class="panel book-card"><a href="/book/{b["id"]}">'+(f'<img class="book-cover" loading="lazy" src="/cover/{b["id"]}" alt="cover of {h(b["title"])}">' if b['cover_path'] else f'<div class="book-cover-placeholder">{h(b["title"])}</div>')+f'</a><div class="book-info"><a href="/book/{b["id"]}"><strong>{h(b["title"])}</strong></a><p>{h(", ".join(jsonarr(b["authors"])))}</p><p>{h(b["series"] or "")}{" · #"+h(b["series_index"]) if b["series_index"] is not None else ""}</p><span class="tag">{h(LABELS.get(b["status"],"Not answered"))}</span>{"<span class=badge>review</span>" if b["needs_review"] else ""}</div></article>' for b in rows)
+        return layout('Library',f'<div class=section-head>your catalog / overview</div><h1>your library<span style="color:var(--primary)">.</span></h1><div class=stat-strip><div class=stat-chip><b>{count:,}</b> titles</div><div class=stat-chip><b>{pending:,}</b> suggestions</div><div class=stat-chip><b>{len(rows):,}</b> shown</div></div>{filters}<section class="grid">{cards or "<p>No books found. Run bookledger scan first.</p>"}</section>')
     @app.get('/book/{book_id}',response_class=HTMLResponse)
     def book(book_id:int):
         with db() as c:
@@ -123,7 +194,7 @@ def create_app(db_path):
         sessionform=f'<form method="post" action="/book/{book_id}/session" class="panel">{token()}<h3>Add reading session</h3><label>Started<input type="date" name="started"></label><label>Finished<input type="date" name="finished"></label><label>Minutes<input type="number" min="0" name="minutes_read"></label><label>Pages read<input type="number" min="0" name="pages_read"></label><label>Note<input name="note"></label><button>Add session</button></form>'
         fileitems=''.join(f'<li>{h(x["path"])} · {x["bytes"]:,} bytes · {h(x["extension"])} {"(unavailable)" if x["missing"] else ""}{" · "+h(x["extract_error"]) if x["extract_error"] else ""}</li>' for x in files)
         category_form=f'<form method="post" action="/book/{book_id}/category">{token()}<label>Add category/shelf<input name="category" maxlength="80" required></label><button>Add category</button></form>'
-        card=f'<section class="panel"><h1>{h(b["title"])}</h1><p>{h(", ".join(jsonarr(b["authors"])))}</p>{fields}<p>Categories: {" ".join(f"<span class=tag>{h(x[0])} · {int(x[1]*100)}%</span>" for x in cats)}</p>{category_form}<h3>Files (read-only references)</h3><ul>{fileitems}</ul><details><summary>Metadata sources & confidence</summary><pre>{h(json.dumps(json.loads(b["provenance_json"]),indent=2))}</pre><pre>{h(json.dumps(json.loads(b["confidence_json"]),indent=2))}</pre><pre>{h(json.dumps(json.loads(b["metadata_json"]),indent=2))}</pre></details></section>'
+        card=f'<section class="panel">{f"<img class=detail-cover src=/cover/{book_id} alt=cover>" if b["cover_path"] else ""}<h1>{h(b["title"])}</h1><p>{h(", ".join(jsonarr(b["authors"])))}</p>{fields}<p>Categories: {" ".join(f"<span class=tag>{h(x[0])} · {int(x[1]*100)}%</span>" for x in cats)}</p>{category_form}<h3>Files (read-only references)</h3><ul>{fileitems}</ul><details><summary>Metadata sources & confidence</summary><pre>{h(json.dumps(json.loads(b["provenance_json"]),indent=2))}</pre><pre>{h(json.dumps(json.loads(b["confidence_json"]),indent=2))}</pre><pre>{h(json.dumps(json.loads(b["metadata_json"]),indent=2))}</pre></details></section>'
         sessions_html=''.join(f'<li>{h(x["started"])} → {h(x["finished"])} · {h(x["minutes_read"])} min · {h(x["note"])}</li>' for x in sessions)
         return layout(b['title'],f'<div class="split"><div>{card}<section class="panel"><h3>Reading sessions</h3><ul>{sessions_html or "No sessions yet"}</ul></section>{sessionform}</div><div>{reading}</div></div>')
     @app.post('/book/{book_id}/reading')

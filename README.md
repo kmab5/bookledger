@@ -1,4 +1,4 @@
-# BookLedger v0.1
+# BookLedger v0.4
 
 A self-hosted, **metadata-only** ebook catalog and reading tracker. It does not rename, copy, delete or move books. It opens supported files **read-only** to extract metadata. Python 3.11+.
 
@@ -86,3 +86,16 @@ The CLI now prints each scanned directory, file and processing stage, plus a
 summary. This makes slow PDF parsing or large-file hashing visible. No ebook
 files are modified. Web scans accept paths reachable by the server process;
 this interface intentionally has no file upload or arbitrary file manipulation.
+
+## v0.4: kmab design, covers, enrichment, exports
+
+- Web app uses kmab's dark palette, Space Grotesk / Space Mono, responsive book cover cards, updated forms, and an SVG favicon.
+- Cover images embedded in EPUB and CBZ are extracted read-only and cached as resized JPEG thumbnails next to the SQLite database (`covers/<book_id>.jpg`). Online Open Library cover thumbnails can also be downloaded while online. Requires Pillow.
+- `GET /cover/<id>` serves only files from the catalog cover cache. Previously indexed books can obtain covers using the new `/enrich` page, which also fills missing metadata from Open Library. Enrichment never overwrites existing non-empty catalog fields.
+- Parent folder names provide extra low-confidence category suggestions; directories whose names suggest series/sagas can propose series names. They are never silently trusted as authoritative.
+- `/exports` offers multi-column custom CSV downloads with search, reading status, category and series filters. Editable reference layouts include Bookmory and Hardcover; **these are not verified native import schemas**. Preset buttons produce Goodreads/StoryGraph-shaped CSV and the full-fidelity JSON backup.
+- `bookledger review` currently opens the same web server as `bookledger serve`, with no specialized initial page. Prefer `bookledger serve`.
+- Covers are stored as derived metadata assets, not copies of the books. Deleting a library database does not delete the original ebook files.
+- No authentication, no AI and no ebook moving/renaming/deletion.
+
+The GitHub Pages landing page is separate from the local FastAPI app. GitHub Pages cannot host the scanner/database server.
