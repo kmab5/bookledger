@@ -136,3 +136,11 @@ The `/series` page is a visual collection browser with cover stacks, progress in
 - Online enrichment remains a best-effort Open Library lookup and only fills blank fields. It never changes reading status or overwrites manually filled metadata. A job already in progress must complete or stop before another starts.
 
 Run `python -m pytest` after installing dependencies. This release adds no authentication.
+
+
+## v0.9 interface update
+
+- **Quick Sort**: down arrow/down swipe hides the current book without changing its reading status. Hidden books can be restored using the library's hidden-only filter. Left=not read, right=finished, up=skip.
+- **Statistics**: a rebuilt `/stats` dashboard shows reading classification, progress, reading time, formats, covers, metadata-review backlog, series coverage, recorded finish dates and the largest series. Counts are derived from the existing SQLite database.
+- **Series context menus**: right-click a series card or book row; touch-and-hold, or use the keyboard Context Menu key / Shift+F10. Available actions depend on whether the target is a series, a current member, or a candidate. Deleting a series clears assignments, not books.
+- No schema changes are required. Backup your SQLite database before updating.
