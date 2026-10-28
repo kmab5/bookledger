@@ -3,7 +3,7 @@ requires = ["setuptools>=68", "wheel"]
 build-backend = "setuptools.build_meta"
 [project]
 name = "bookledger-local"
-version = "0.2.0"
+version = "0.3.0"
 description = "Offline-capable, metadata-only personal ebook catalog and reading tracker"
 requires-python = ">=3.11"
 dependencies = ["fastapi>=0.110,<1", "uvicorn>=0.27,<1", "typer>=0.12,<1", "pymupdf>=1.24,<2", "python-multipart>=0.0.9"]

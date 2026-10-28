@@ -170,8 +170,8 @@ def cbz_meta(path):
         return out,raw
 
 def pdf_meta(path):
-    import fitz
-    with fitz.open(path) as doc:
+    import pymupdf
+    with pymupdf.open(path) as doc:
         raw=dict(doc.metadata or {}); out={'page_count':len(doc),'page_count_kind':'exact'}
         for key in ('title','author','subject','keywords','creationDate'):
             val=clean(raw.get(key))
@@ -284,26 +284,37 @@ def potential_related(db, book_id, data):
             a,b=sorted((book_id,candidate['id']))
             db.execute('INSERT OR IGNORE INTO book_links(book_id,candidate_id,kind,confidence) VALUES(?,?,?,?)',(a,b,'possible_edition',min(.99,round(title_sim*.96,3))))
 
-def scan(db, root, online=True):
+def scan(db, root, online=True, progress=None):
     root=Path(root).expanduser().resolve()
     if not root.is_dir(): raise ValueError(f'Not a folder: {root}')
+    def emit(kind, **details):
+        if progress:
+            progress({'event':kind, **details})
+    emit('start', root=str(root), online=online)
     started=now(); run=db.execute('INSERT INTO scan_runs(root,started) VALUES(?,?)',(str(root),started)).lastrowid
     totals={'new':0,'updated':0,'unchanged':0,'errors':0}
+    processed=0
     for directory, dirs, names in os.walk(root):
         dirs[:]=[d for d in dirs if not d.startswith('.')]
+        emit('directory', path=directory, processed=processed, **totals)
         for filename in names:
             path=Path(directory)/filename
             if path.suffix.lower() not in FORMATS: continue
+            processed+=1
+            emit('file_start', path=str(path), processed=processed, **totals)
             try:
                 st=path.stat(); fingerprint=file_fingerprint(path,st)
                 old=db.execute('SELECT * FROM files WHERE path=?',(str(path),)).fetchone()
                 if old and old['fingerprint']==fingerprint:
-                    db.execute('UPDATE files SET last_seen=?,missing=0 WHERE id=?',(started,old['id'])); totals['unchanged']+=1; continue
+                    db.execute('UPDATE files SET last_seen=?,missing=0 WHERE id=?',(started,old['id'])); totals['unchanged']+=1; emit('file_done', path=str(path), outcome='unchanged', processed=processed, **totals); continue
+                emit('stage', path=str(path), stage='extracting metadata', processed=processed)
                 guessed=parse_name(path); embedded, raw, err=extract(path)
+                emit('stage', path=str(path), stage='computing hash', processed=processed)
                 digest=file_sha256(path)
                 data={**guessed}; sources={k:'filename' for k,v in guessed.items() if v}; scores={k:.55 for k in sources}
                 for k,v in embedded.items():
                     if v not in (None,'',[]): data[k]=v; sources[k]='embedded'; scores[k]=.95 if k!='series_index' else .92
+                if online: emit('stage', path=str(path), stage='online metadata lookup', processed=processed)
                 external, enrichment=enrich(db,data,online)
                 for k,v in external.items():
                     if data.get(k) in (None,'',[]): data[k]=v; sources[k]='openlibrary'; scores[k]=.65 if k=='authors' and not guessed.get('authors') else .82
@@ -356,11 +367,13 @@ def scan(db, root, online=True):
                     totals['new']+=1
                 if err: totals['errors']+=1
                 db.commit()
+                emit('file_done', path=str(path), outcome='updated' if old else 'new', warning=err, processed=processed, **totals)
             except (OSError,sqlite3.DatabaseError,ValueError) as exc:
                 totals['errors']+=1
-                print(f'Could not index {path}: {exc}')
+                emit('error', path=str(path), message=str(exc), processed=processed, **totals)
     # Do not mark files absent unless inside the scanned tree; missing is reversible.
     prefix=str(root)+os.sep
     db.execute('UPDATE files SET missing=1 WHERE (path LIKE ? ESCAPE "\\" OR path=?) AND last_seen<>?',(prefix.replace('\\','\\\\').replace('%','\\%').replace('_','\\_')+'%',str(root),started))
     db.execute('UPDATE scan_runs SET ended=?,count_new=?,count_updated=?,count_unchanged=?,errors=? WHERE id=?',(now(),totals['new'],totals['updated'],totals['unchanged'],totals['errors'],run));db.commit()
+    emit('complete', processed=processed, **totals)
     return totals

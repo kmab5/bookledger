@@ -73,3 +73,16 @@ pytest -q
 **No login or authentication was added.** Keep `bookledger serve` on localhost by default, and use `--host 0.0.0.0` only on a trusted Wi-Fi network. Without authentication, anyone who can reach the server can change its data.
 
 **Important limitations:** filenames alone cannot reliably identify editions or series; online catalog lookups may suggest work-level metadata rather than edition-specific data. EPUB page count is not a fixed number. Some formats rely on an optional installed Calibre executable. The current edition-suggestion workflow labels relationships; it intentionally does not auto-merge records or their reading histories.
+
+### Scanning from the website (v0.3)
+
+Open `/scan` from the website navigation, enter an absolute folder path on the
+**computer running the server**, and start indexing. The page polls live status,
+showing the current file, stage, results and errors. It works from a phone browser
+on the same trusted local network, but cannot access phone-only files directly.
+Only one web scan runs at a time; a server restart interrupts the current scan.
+
+The CLI now prints each scanned directory, file and processing stage, plus a
+summary. This makes slow PDF parsing or large-file hashing visible. No ebook
+files are modified. Web scans accept paths reachable by the server process;
+this interface intentionally has no file upload or arbitrary file manipulation.

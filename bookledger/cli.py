@@ -10,9 +10,30 @@ def database(path:Path):
 @app.command()
 def scan_folder(folder:Path=typer.Argument(...,help='Folder to recursively index'),db:Path=typer.Option(DEFAULT,'--db'),online:bool=typer.Option(True,'--online/--offline',help='Automatically consult Open Library')):
     """Scan a directory, read metadata, and enrich matching records."""
-    with database(db) as con:
-        stats=scan(con,folder,online)
-    typer.echo('Scan complete: '+', '.join(f'{k}={v}' for k,v in stats.items()))
+    import time
+    started=time.monotonic()
+    typer.echo(f'Scanning: {folder.expanduser().resolve()}')
+    typer.echo(f'Mode: {"online enrichment" if online else "offline"} | Database: {db.expanduser()}')
+    def report(event):
+        kind=event['event']
+        if kind=='directory':
+            typer.echo(f'  Directory: {event["path"]}', err=False)
+        elif kind=='file_start':
+            typer.echo(f'  [{event["processed"]}] {event["path"]}', err=False)
+        elif kind=='stage':
+            typer.echo(f'      {event["stage"]}...', err=False)
+        elif kind=='file_done':
+            extra=f' (warning: {event["warning"]})' if event.get('warning') else ''
+            typer.echo(f'      -> {event["outcome"]}{extra}',err=False)
+        elif kind=='error':
+            typer.echo(f'      ERROR: {event["message"]}',err=True)
+    try:
+        with database(db) as con:
+            stats=scan(con,folder,online,progress=report)
+    except (OSError,ValueError) as exc:
+        typer.echo(f'Scan failed: {exc}',err=True)
+        raise typer.Exit(1)
+    typer.echo(f'Scan complete in {time.monotonic()-started:.1f}s: '+', '.join(f'{k}={v}' for k,v in stats.items()))
 @app.command()
 def serve(db:Path=typer.Option(DEFAULT,'--db'),host:str=typer.Option('127.0.0.1','--host'),port:int=typer.Option(8787,'--port')):
     """Start local dashboard; use --host 0.0.0.0 for trusted LAN phone access."""

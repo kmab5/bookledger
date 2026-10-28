@@ -1,17 +1,16 @@
 from __future__ import annotations
-import html, json, os, secrets, sqlite3
+import html, json, os, secrets, sqlite3, threading, time
 from pathlib import Path
 from fastapi import FastAPI, Form, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
-from .core import connect, jsonarr, now
+from .core import connect, jsonarr, now, scan
 
 STATES=['unanswered','not_read','want_to_read','reading','finished','abandoned','on_hold','rereading']
 LABELS={'unanswered':'Not answered','not_read':'Not read','want_to_read':'Want to read','reading':'Currently reading','finished':'Finished','abandoned':'Started & abandoned','on_hold':'On hold','rereading':'Rereading'}
 CSS='''*{box-sizing:border-box}body{font-family:system-ui,Segoe UI,sans-serif;margin:0;background:#f6f7f9;color:#1c2633}header{background:#16283f;color:white;padding:20px}header a{color:white;margin-right:22px;text-decoration:none}main{max-width:1150px;margin:24px auto;padding:0 16px}.panel{background:white;border:1px solid #e0e6ec;border-radius:14px;padding:20px;margin-bottom:16px;box-shadow:0 3px 14px #172b4410}.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(270px,1fr));gap:12px}.muted{color:#637084;font-size:.91rem}.tag{background:#e7eef7;border-radius:6px;padding:3px 7px;font-size:.8rem;display:inline-block;margin:2px}a{color:#1764ac}label{display:block;font-size:.9rem;margin-top:12px}input,select,textarea{font:inherit;width:100%;padding:9px;border:1px solid #b9c5d0;border-radius:8px;background:white}button{background:#1764ac;color:white;padding:10px 15px;border:0;border-radius:8px;cursor:pointer;margin-top:12px}button.ghost{background:#53647a}.toolbar{display:flex;gap:10px;flex-wrap:wrap}.toolbar>*{flex:1;min-width:150px}.badge{font-size:.78rem;padding:4px 7px;border-radius:8px;background:#f5e8c8}.good{background:#d8f2df}.split{display:grid;grid-template-columns:2fr 1fr;gap:18px}pre{white-space:pre-wrap;word-break:break-all}details{margin-top:12px}@media(max-width:700px){.split{grid-template-columns:1fr}header a{display:inline-block;margin-bottom:10px}}'''
-CSS += "/* BOOKLEDGER KMAB BRAND THEME */\n/* BookLedger product UI. Inject after the original inline CSS in webapp.py. */\n\n:root{color-scheme:dark;--bg:#0e0e11;--surface:#17171b;--surface2:#1e1e24;--line:#2a2a31;--text:#edebe4;--muted:#9a9aa6;--purple:#b24bff;--green:#3de08a;--amber:#f5c451}\nbody{background:var(--bg)!important;color:var(--text)!important;font-family:'Space Grotesk',system-ui,sans-serif!important;line-height:1.6}\nheader{background:#15151a!important;border-bottom:1px solid var(--line)!important;padding:19px max(20px,calc((100vw - 1150px)/2))!important;display:flex;align-items:center;gap:32px;flex-wrap:wrap}\nheader strong{font-size:22px;letter-spacing:-1px;font-weight:700}header strong::after{content:'.';color:var(--purple)}header nav{display:flex;gap:17px;flex-wrap:wrap}header a{color:var(--muted)!important;margin:0!important;font-size:12px;transition:color .2s}header a:hover{color:var(--text)!important}\nmain{max-width:1150px!important;margin:35px auto!important;padding:0 20px!important}h1,h2,h3{letter-spacing:-.04em;font-weight:600;line-height:1.2}h1{font-size:clamp(32px,4vw,48px)}h2{font-size:24px}h3{font-size:20px}main>p{color:var(--muted)}\n.panel{background:var(--surface)!important;border:1px solid var(--line)!important;box-shadow:none!important;border-radius:12px!important;padding:23px!important;margin-bottom:14px!important}.panel:hover{border-color:#38313f!important}.muted{color:var(--muted)!important}.grid{gap:13px!important}\na{color:#d49aff}a:hover{color:#e3beff}label{color:var(--muted);font-size:12px!important;font-weight:500}\ninput,select,textarea{background:#101014!important;color:var(--text)!important;border:1px solid #3a3a44!important;border-radius:7px!important;padding:11px 12px!important;font-family:inherit!important;accent-color:var(--purple)}input:focus,select:focus,textarea:focus{outline:2px solid #b24bff66;outline-offset:1px;border-color:var(--purple)!important}input::placeholder{color:#777781}input[type=checkbox]{width:auto}\nbutton{background:var(--purple)!important;color:#100b17!important;font-weight:700!important;border-radius:7px!important;padding:11px 16px!important}button:hover{background:#c373ff!important}button.ghost{background:#27232e!important;color:var(--text)!important;border:1px solid #4a3b55!important}\n.tag{background:#2d2239!important;color:#d49aff!important;border:1px solid #4d3560;border-radius:5px!important}.badge{background:#3d321d!important;color:var(--amber)!important}.good{background:#183b28!important;color:var(--green)!important}.toolbar{align-items:end}.toolbar>button{flex:0 0 auto!important;min-width:90px!important}.toolbar>*{min-width:130px!important}pre,code{font-family:'Space Mono',monospace;background:#101014;border:1px solid var(--line);padding:12px;border-radius:7px;color:#b9f4d5;font-size:12px}summary{cursor:pointer;color:#d49aff}a:focus-visible,button:focus-visible{outline:2px solid var(--purple);outline-offset:3px}\n@media(max-width:700px){header{gap:14px}header nav{gap:12px}.split{grid-template-columns:1fr}.toolbar>button{width:100%;flex:1 1 100%!important}}\n"
 def h(s):return html.escape(str(s if s is not None else ''),quote=True)
 def layout(title,body):
-    return HTMLResponse(f'<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{h(title)} - BookLedger</title><link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Space+Mono:wght@400;700&display=swap" rel="stylesheet"><style>{CSS}</style></head><body><header><strong>BookLedger</strong><nav><a href="/">Library</a><a href="/review">Metadata review</a><a href="/reading">Have you read it?</a><a href="/stats">Statistics</a><a href="/series">Series</a><a href="/duplicates">Possible editions</a></nav></header><main>{body}</main></body></html>')
+    return HTMLResponse(f'<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{h(title)} - BookLedger</title><style>{CSS}</style></head><body><header><strong>BookLedger</strong><nav><a href="/">Library</a><a href="/scan">Scan folders</a><a href="/review">Metadata review</a><a href="/reading">Have you read it?</a><a href="/stats">Statistics</a><a href="/series">Series</a><a href="/duplicates">Possible editions</a></nav></header><main>{body}</main></body></html>')
 def safe_date(v):
     if not v: return None
     from datetime import date
@@ -25,6 +24,68 @@ def create_app(db_path):
     def guard(csrf):
         if not secrets.compare_digest(csrf,app.state.csrf):raise HTTPException(403,'Invalid form token')
     def go(url):return RedirectResponse(url,status_code=303)
+    app.state.scan_lock=threading.Lock()
+    app.state.scan_job=None
+    def public_job():
+        with app.state.scan_lock:
+            job=app.state.scan_job
+            if job is None: return {'status':'idle'}
+            return {k:v for k,v in job.items() if k!='thread'}
+    @app.get('/scan',response_class=HTMLResponse)
+    def scan_page():
+        job=public_job()
+        return layout('Scan folders','''<h1>scan folders</h1><p>Index metadata from a folder on the machine running BookLedger. Files are never moved or modified.</p>
+        <section class="panel"><form action="/scan" method="post">__CSRF_TOKEN__
+        <label>Absolute folder path on server<input name="folder" placeholder="D:/eBooks or /home/user/Books" required></label>
+        <label><input type="checkbox" name="online" value="yes" checked style="width:auto"> Online catalog enrichment</label>
+        <button>Start scan</button></form><p class="muted">Only one scan can run at a time. Phone browsers can start a scan of folders accessible to the PC, not folders stored solely on the phone.</p></section>
+        <section class="panel"><h2>scan status</h2><div id="job">Loading...</div></section>
+        <script>
+        const target=document.getElementById('job');
+        const esc=x=>String(x??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+        async function refresh(){try{const r=await fetch('/scan/status',{cache:'no-store'});if(!r.ok)throw Error('Status request failed');const j=await r.json();
+        if(j.status==='idle'){target.textContent='No scan started yet.';return}
+        const counts=j.counts||{};const lines=(j.events||[]).map(e=>esc(e)).join('\n');
+        target.innerHTML='<p><strong>'+esc(j.status)+'</strong> · '+esc(j.folder)+'</p><p>'+esc(j.processed||0)+' files encountered · '+esc(counts.new||0)+' new · '+esc(counts.updated||0)+' updated · '+esc(counts.unchanged||0)+' unchanged · '+esc(counts.errors||0)+' errors</p><p>Current: '+esc(j.current||'—')+'</p><p>Stage: '+esc(j.stage||'—')+'</p>'+(j.error?'<p>'+esc(j.error)+'</p>':'')+'<pre style="max-height:350px;overflow:auto">'+lines+'</pre>';
+        }catch(e){target.textContent=e.message}}
+        refresh();setInterval(refresh,1500);
+        </script>'''.replace('__CSRF_TOKEN__',token()))
+    @app.get('/scan/status')
+    def scan_status():
+        return JSONResponse(public_job(),headers={'Cache-Control':'no-store'})
+    @app.post('/scan')
+    def begin_scan(folder:str=Form(...),csrf:str=Form(...),online:str=Form('')):
+        guard(csrf)
+        path=Path(folder).expanduser().resolve()
+        if not path.is_dir(): raise HTTPException(422,'Folder does not exist or is not accessible to the server')
+        with app.state.scan_lock:
+            if app.state.scan_job and app.state.scan_job['status']=='running':
+                raise HTTPException(409,'A scan is already running')
+            job={'status':'running','folder':str(path),'processed':0,'current':'','stage':'discovering',
+                 'counts':{'new':0,'updated':0,'unchanged':0,'errors':0},'events':[],'error':None}
+            app.state.scan_job=job
+        def progress(evt):
+            with app.state.scan_lock:
+                job['processed']=evt.get('processed',job['processed'])
+                job['counts']={k:evt.get(k,job['counts'].get(k,0)) for k in job['counts']}
+                if evt.get('path'):job['current']=evt['path']
+                job['stage']=evt.get('stage',evt['event'])
+                if evt['event'] in ('file_start','file_done','error','complete'):
+                    description={'file_start':'reading','file_done':evt.get('outcome','done'),'error':'ERROR','complete':'COMPLETE'}[evt['event']]
+                    detail=evt.get('message') or evt.get('warning') or ''
+                    job['events'].append(f'{description}: {evt.get("path","")} {detail}'.strip())
+                    job['events']=job['events'][-120:]
+        def worker():
+            try:
+                with db() as connection:
+                    scan(connection,path,online=(online=='yes'),progress=progress)
+                with app.state.scan_lock:job['status']='completed';job['stage']='finished'
+            except Exception as exc:
+                with app.state.scan_lock:
+                    job['status']='failed';job['error']=f'{type(exc).__name__}: {exc}';job['stage']='failed'
+        threading.Thread(target=worker,daemon=True,name='bookledger-scan').start()
+        return go('/scan')
+
     @app.get('/',response_class=HTMLResponse)
     def index(q:str='',status:str='',category:str='',series:str='',sort:str='title'):
         with db() as c:
