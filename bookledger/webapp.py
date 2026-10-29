@@ -71,6 +71,7 @@ class BookUpdate(BaseModel):
 class BulkRequest(BaseModel):
     ids: list[int] = Field(min_length=1, max_length=10000)
     action: str
+    series_name: str | None = None
 
 class ReadingSession(BaseModel):
     started: date | None = None
@@ -178,6 +179,42 @@ def create_app(db_path):
             total=c.execute('SELECT COUNT(*)'+base,args).fetchone()[0]
             data=c.execute('SELECT b.*,COALESCE(r.status,\'unanswered\') reading_status'+base+f' ORDER BY {order},b.id LIMIT ? OFFSET ?',args+[per_page,(page-1)*per_page]).fetchall()
         return {'items':[row(x) for x in data],'total':total,'page':page,'per_page':per_page}
+    @app.get('/api/quick-sort/authors')
+    def quick_authors():
+        with db() as c:
+            values=c.execute('SELECT authors FROM books').fetchall()
+        names=set()
+        for r in values:
+            for name in jsonarr(r['authors']):
+                if isinstance(name,str) and name.strip():names.add(name.strip())
+        return {'items':sorted(names,key=str.casefold)}
+
+    @app.get('/api/quick-sort/queue')
+    def quick_queue(scope:str='all',value:str='',order:str='title',size:int=Query(50,ge=1,le=1000),
+                    offset:int=Query(0,ge=0),include_classified:bool=False,include_subfolders:bool=True):
+        if scope not in ('all','series','folder','author'):raise HTTPException(422,'Invalid scope')
+        if order not in ('title','reverse','random','series','author'):raise HTTPException(422,'Invalid order')
+        wh=['b.hidden=0'];args=[]
+        if not include_classified:wh.append("COALESCE(r.status,'unanswered')='unanswered'")
+        if scope!='all':
+            if not value.strip():raise HTTPException(422,'A scope value is required')
+            if scope=='series':wh.append('b.series=?');args.append(value)
+            elif scope=='author':wh.append('EXISTS (SELECT 1 FROM json_each(b.authors) WHERE LOWER(value)=LOWER(?))');args.append(value)
+            else:
+                folder=value.rstrip('/\\').replace('\\','/')
+                if include_subfolders:
+                    wh.append("EXISTS(SELECT 1 FROM files f WHERE f.book_id=b.id AND SUBSTR(REPLACE(f.path,CHAR(92),'/'),1,LENGTH(?)+1)=?)")
+                    args.extend([folder,folder+'/'])
+                else:
+                    wh.append("EXISTS(SELECT 1 FROM files f WHERE f.book_id=b.id AND SUBSTR(REPLACE(f.path,CHAR(92),'/'),1,LENGTH(?)+1)=? AND INSTR(SUBSTR(REPLACE(f.path,CHAR(92),'/'),LENGTH(?)+2),'/')=0)")
+                    args.extend([folder,folder+'/',folder])
+        orders={'title':'b.title COLLATE NOCASE,b.id','reverse':'b.title COLLATE NOCASE DESC,b.id DESC','random':'RANDOM()','series':'b.series_index IS NULL,b.series_index,b.title COLLATE NOCASE,b.id','author':'b.authors COLLATE NOCASE,b.title COLLATE NOCASE,b.id'}
+        base=' FROM books b LEFT JOIN reading r ON r.book_id=b.id WHERE '+' AND '.join(wh)
+        with db() as c:
+            total=c.execute('SELECT COUNT(*)'+base,args).fetchone()[0]
+            results=c.execute("SELECT b.*,COALESCE(r.status,'unanswered') reading_status"+base+' ORDER BY '+orders[order]+' LIMIT ? OFFSET ?',args+[size,offset]).fetchall()
+        return {'items':[row(x) for x in results],'total':total,'offset':offset,'size':size}
+
     @app.get('/api/books/{book_id}')
     def book(book_id:int):
         with db() as c:
@@ -240,13 +277,16 @@ def create_app(db_path):
     @app.post('/api/books/bulk')
     def bulk(payload:BulkRequest):
         ids=list(dict.fromkeys(payload.ids)); action=payload.action
-        if action not in STATES and action not in ('hide','unhide','unassign_series'):raise HTTPException(422,'Invalid action')
+        if action not in STATES and action not in ('hide','unhide','unassign_series','assign_series'):raise HTTPException(422,'Invalid action')
+        if action=='assign_series' and (not payload.series_name or not payload.series_name.strip() or len(payload.series_name)>250):raise HTTPException(422,'A valid series name is required')
         with db() as c:
+            if action=='assign_series':c.execute('INSERT OR IGNORE INTO series_catalog(name,updated_at) VALUES(?,?)',(payload.series_name.strip(),now()))
             actual={x[0] for x in c.execute('SELECT id FROM books WHERE id IN ('+','.join('?'*len(ids))+')',ids)}
             for book_id in ids:
                 if book_id not in actual:continue
                 if action in STATES:status_update(c,book_id,action)
                 elif action in ('hide','unhide'):c.execute('UPDATE books SET hidden=? WHERE id=?',(int(action=='hide'),book_id))
+                elif action=='assign_series':c.execute('UPDATE books SET series=?,series_index=NULL,updated_at=? WHERE id=?',(payload.series_name.strip(),now(),book_id))
                 else:c.execute('UPDATE books SET series=NULL,series_index=NULL WHERE id=?',(book_id,))
             c.commit()
         return {'ok':True,'changed':len(actual)}

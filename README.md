@@ -84,3 +84,12 @@ Open **`/settings`** from the sidebar to manage persisted application preference
 The library filter offers an explicit **nested folders** override. When unchecked, `D:/eBooks/Fantasy` returns only files directly inside that directory; when checked, nested series folders are included. Settings can also be read/updated via `GET /api/settings`, `PATCH /api/settings`, and reset via `POST /api/settings/reset`. Unknown preferences or invalid values return HTTP 422; reset does not delete books.
 
 For developers: frontend source is under `frontend/src`, run `python build_frontend.py` to regenerate `bookledger/frontend_dist` without Node. The original v1 server-rendered HTML tests no longer target the v2 SPA; see `tests/test_settings.py` and the v2 API tests for the new behavior.
+
+## v2.4 additions (2026-10-29)
+
+- Library: activate selection through an item's context menu, choose **assign series** from the bulk bar, and enter an existing or new series name. Existing per-book series indices are cleared for reassignment. No source files change.
+- Quick Sort: dedicated batch builder for all books, one series, one folder, or one author; selectable sorting (A–Z, Z–A, random, series volume, author), batch size 1–1000, offset, classified inclusion, and nested-folder inclusion.
+- Within a group queue, **sort entire group** can mark all matching books read, not read, or hidden, after confirmation. It uses batches of at most 1000 database updates. Group operations include already-classified visible books and all nested files if selected. Be careful: these actions overwrite existing reading statuses.
+- `/api/quick-sort/queue` and `/api/quick-sort/authors` expose the filtered queue and author selections. `/api/books/bulk` now supports `action: assign_series` and `series_name`.
+
+Note: This release was based on the archived v2.3 source. The repository's HEAD was verified as `9db124514377685e1da6f3b67697129587f5a55e`, and the current backend file blob matched the archive; the frontend blob differed. A full clone was unavailable because the runtime couldn't resolve github.com. Reconcile any newer remote frontend edits before applying this archive.
