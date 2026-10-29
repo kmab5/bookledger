@@ -11,6 +11,7 @@ from .core import connect, now, jsonarr, scan, enrich_existing
 from .export import export_json, export_csv
 from .custom_export import export_custom, FIELDS, TEMPLATES
 from .legacy_webapp import create_app as legacy_app
+from .advanced_query import query_books, query_series, metadata as query_metadata, compile_group, BOOK_FIELDS, BOOK_SORT_FIELDS, query_reviews
 
 ROOT = Path(__file__).parent
 STATES = {'unanswered','not_read','want_to_read','reading','finished','abandoned','on_hold','rereading'}
@@ -98,6 +99,7 @@ class JobRequest(BaseModel):
 
 class ExportRequest(BaseModel):
     fields: list[str]
+    advanced_query: dict | None = None
     status: str = ''
     category: str = ''
     series: str = ''
@@ -110,6 +112,7 @@ def create_app(db_path):
     location.parent.mkdir(parents=True, exist_ok=True)
     with connect(location) as con:
         con.execute("CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, value_json TEXT NOT NULL)")
+        con.execute("CREATE TABLE IF NOT EXISTS saved_views (id INTEGER PRIMARY KEY, scope TEXT NOT NULL CHECK(scope IN ('books','series','reading','quick','review','exports','series_members')), name TEXT NOT NULL, definition TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(scope,name))")
         con.commit()
     def db(): return connect(location)
     def read_settings(c):
@@ -148,6 +151,91 @@ def create_app(db_path):
         if state not in STATES: raise HTTPException(422,'Unknown reading status')
         exists(c,book_id)
         c.execute('INSERT INTO reading(book_id,status,updated_at) VALUES(?,?,?) ON CONFLICT(book_id) DO UPDATE SET status=excluded.status,updated_at=excluded.updated_at',(book_id,state,now()))
+    @app.get('/api/query/metadata')
+    def advanced_metadata():
+        data=query_metadata()
+        with db() as c:
+            paths=[x[0].replace(chr(92),'/') for x in c.execute('SELECT DISTINCT path FROM files WHERE path IS NOT NULL')]
+            folders=set()
+            for path in paths:
+                parts=path.split('/')
+                for k in range(1,len(parts)):
+                    candidate='/'.join(parts[:k])
+                    if candidate:folders.add(candidate)
+            data['choices']={
+                'folder':sorted(folders,key=str.casefold)[:1500],
+                'category':[r[0] for r in c.execute('SELECT name FROM categories ORDER BY name LIMIT 1500')],
+                'format':[r[0] for r in c.execute('SELECT DISTINCT extension FROM files ORDER BY extension LIMIT 150') if r[0]],
+                'series':[r[0] for r in c.execute('SELECT DISTINCT name FROM series_catalog ORDER BY name LIMIT 1500')],
+                'language':[r[0] for r in c.execute('SELECT DISTINCT language FROM books WHERE language IS NOT NULL ORDER BY language LIMIT 150')],
+                'publisher':[r[0] for r in c.execute('SELECT DISTINCT publisher FROM books WHERE publisher IS NOT NULL ORDER BY publisher LIMIT 500')],
+            }
+        return data
+
+    @app.post('/api/query/books')
+    def advanced_books(payload:dict):
+        with db() as c: result=query_books(c,payload)
+        result['items']=[row(x) for x in result['items']]
+        return result
+
+    @app.post('/api/query/series')
+    def advanced_series(payload:dict):
+        with db() as c:return query_series(c,payload)
+
+    @app.post('/api/query/quick-sort')
+    def advanced_quick_sort(payload:dict):
+        # A single SQL query makes randomized order stable within one batch.
+        size=payload.get('per_page',50)
+        if type(size)!=int or not 1<=size<=1000:raise HTTPException(422,'Batch must contain 1–1000 books')
+        page=payload.get('page',1)
+        if type(page)!=int or not 1<=page<=100000:raise HTTPException(422,'Invalid page')
+        sort=payload.get('sort',[])
+        randomize=bool(payload.get('random',False))
+        if randomize and sort:raise HTTPException(422,'Cannot combine random order with multiple sorts')
+        with db() as c:
+            if not randomize:
+                from .advanced_query import query_books
+                result=query_books(c,payload,max_per_page=1000)
+            else:
+                result=query_books(c,{**payload,'sort':[]},max_per_page=1000,randomize=True)
+        result['items']=[row(x) for x in result['items']]
+        return result
+
+    @app.post('/api/query/reviews')
+    def advanced_reviews(payload:dict):
+        with db() as c:return query_reviews(c,payload)
+
+    @app.get('/api/query/views')
+    def list_saved_views(scope:str='books'):
+        if scope not in ('books','series','reading','quick','review','exports','series_members'):raise HTTPException(422,'Invalid view scope')
+        with db() as c:
+            rows=c.execute('SELECT id,scope,name,definition,created_at,updated_at FROM saved_views WHERE scope=? ORDER BY name COLLATE NOCASE',(scope,)).fetchall()
+        return {'items':[{'id':r['id'],'scope':r['scope'],'name':r['name'],'query':json.loads(r['definition']),'created_at':r['created_at'],'updated_at':r['updated_at']} for r in rows]}
+
+    @app.post('/api/query/views')
+    def save_view(payload:dict):
+        scope=payload.get('scope');name=payload.get('name');definition=payload.get('query')
+        if scope not in ('books','series','reading','quick','review','exports','series_members'):raise HTTPException(422,'Invalid scope')
+        if not isinstance(name,str) or not 1<=len(name.strip())<=80:raise HTTPException(422,'Name must be 1–80 characters')
+        if not isinstance(definition,dict):raise HTTPException(422,'Invalid query')
+        # Validate before writing, even when no book matches.
+        with db() as c:
+            if scope=='series':query_series(c,{**definition,'per_page':1})
+            elif scope=='review':query_reviews(c,{**definition,'per_page':1})
+            else:query_books(c,{**definition,'per_page':1})
+            try:
+                c.execute('INSERT INTO saved_views(scope,name,definition,created_at,updated_at) VALUES(?,?,?,?,?)',(scope,name.strip(),json.dumps(definition,ensure_ascii=False),now(),now()))
+                ident=c.execute('SELECT last_insert_rowid()').fetchone()[0];c.commit()
+            except Exception as exc:raise HTTPException(409,'A saved view with that name already exists') from exc
+        return {'id':ident,'ok':True}
+
+    @app.delete('/api/query/views/{view_id}')
+    def delete_view(view_id:int):
+        with db() as c:
+            changed=c.execute('DELETE FROM saved_views WHERE id=?',(view_id,)).rowcount;c.commit()
+        if not changed:raise HTTPException(404,'View not found')
+        return {'ok':True}
+
     @app.get('/api/health')
     def health(): return {'ok':True,'version':'2.0'}
     @app.get('/api/books')
@@ -436,7 +524,19 @@ def create_app(db_path):
     @app.post('/api/exports/custom')
     def custom_export(payload:ExportRequest):
         if not payload.fields or any(f not in FIELDS for f in payload.fields):raise HTTPException(422,'Unknown fields')
-        with db() as c:data=export_custom(c,payload.fields,payload.status,payload.category,payload.series,payload.search)
+        with db() as c:
+            ids=None
+            if payload.advanced_query is not None:
+                ids=[]
+                q={**payload.advanced_query,'per_page':200}
+                q.pop('offset',None)
+                offset=0
+                while True:
+                    batch=query_books(c,{**q,'page':offset//200+1})
+                    ids.extend(item['id'] for item in batch['items'])
+                    offset+=len(batch['items'])
+                    if not batch['items'] or offset>=batch['total']:break
+            data=export_custom(c,payload.fields,payload.status,payload.category,payload.series,payload.search,book_ids=ids)
         return Response(data,media_type='text/csv; charset=utf-8',headers={'Content-Disposition':'attachment; filename="bookledger-custom.csv"'})
     # Fallback old UI at /legacy; no ebook files are edited by either UI.
     app.mount('/legacy',legacy_app(location))

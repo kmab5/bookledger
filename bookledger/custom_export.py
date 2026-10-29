@@ -9,7 +9,7 @@ TEMPLATES={
  'catalog':['title','authors','isbn13','isbn10','publisher','published','language','series','series_index','categories','formats'],
  'bookmory-reference':['title','author','isbn13','status','started','finished','rating','notes','minutes_read'],
  'hardcover-reference':['title','author','isbn13','status','started','finished','rating','notes']}
-def export_custom(db, fields, status='',category='', series='', search=''):
+def export_custom(db, fields, status='',category='', series='', search='',book_ids=None):
     fields=[f for f in fields if f in FIELDS]
     if not fields:raise ValueError('Select at least one column')
     query='SELECT b.*,r.status,r.started,r.finished,r.minutes_read,r.rating,r.read_count,r.notes FROM books b LEFT JOIN reading r ON r.book_id=b.id WHERE 1=1'
@@ -21,7 +21,11 @@ def export_custom(db, fields, status='',category='', series='', search=''):
         query+=' AND EXISTS(SELECT 1 FROM book_categories bc JOIN categories c ON c.id=bc.category_id WHERE bc.book_id=b.id AND c.name=?)';args.append(category)
     query+=' ORDER BY b.title COLLATE NOCASE'
     output=io.StringIO(newline='');writer=csv.DictWriter(output,fieldnames=fields);writer.writeheader()
-    for row in db.execute(query,args):
+    rows=list(db.execute(query,args))
+    if book_ids is not None:
+        by_id={r['id']:r for r in rows}
+        rows=[by_id[i] for i in book_ids if i in by_id]
+    for row in rows:
         item=dict(row);authors=jsonarr(item.get('authors'));item['authors']=', '.join(authors);item['author']=authors[0] if authors else ''
         item['subjects']=', '.join(jsonarr(item.get('subjects')))
         item['added']=item.get('created_at','')

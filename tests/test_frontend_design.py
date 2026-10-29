@@ -14,7 +14,8 @@ def test_new_static_frontend_is_shipped(tmp_path):
     css = client.get('/style.css')
     assert js.status_code == 200 and css.status_code == 200
     assert 'nav-group' in js.text
-    assert 'filter-advanced' in js.text
+    assert 'query-launch' in client.get('/advanced.js').text
+    assert 'adv-group' in client.get('/advanced.js').text
     assert 'reading-tabs' in js.text
     assert 'series-controls' in js.text
     assert 'quick-progress' in js.text

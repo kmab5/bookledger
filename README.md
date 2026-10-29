@@ -113,3 +113,59 @@ A comprehensive visual and interaction redesign built **directly from the source
 Run `python -m pytest -q` for the complete Python test suite. All 32 tests passed for this release. `node --check frontend/src/main.js` passed. Isolated Chromium rendered the library, series, reading, statistics, settings, book details, and Quick Sort at 1440px and 390px widths with sample data; none showed JavaScript exceptions or horizontal overflow. Context-menu selection, exiting selection, filter expansion, and mobile drawer close were also interactively checked. This is not a guarantee that every device or browser is flawless: verify with your real library and local server.
 
 To rebuild without npm, run `python build_frontend.py`. The packaged `bookledger/frontend_dist` already contains the updated frontend.
+
+## v2.6 — advanced filtering and multi-sort
+
+The filter engine is now **shared** by the Library, Reading Review, Series catalog and membership editor, Quick Sort, Metadata Review, and custom exports. It runs against SQLite; filtering isn't limited to whatever books happen to be visible on-screen.
+
+Open **advanced filters** on any of these pages to:
+
+- Match **all (AND)** or **any (OR)** conditions; nest condition groups up to three levels deep, with up to 30 total rules.
+- Filter by titles, authors, reading status, series, category, original source folder (with optional nested-subfolder inclusion), format, publisher, language, ISBN, page/word counts, reading time, rating, start/finish dates, cover presence, metadata review status, visibility, possible duplicates, file sizes, missing files, and other indexed fields.
+- Use relevant comparisons: equals/does not equal, contains/excludes, begins/ends with, number/date ranges, empty/not empty, boolean state, and value lists.
+- Define **up to four ordered sort levels**, ascending or descending. Results use a consistent book-ID tie-breaker, with missing values last.
+- Save named filter+sort views in SQLite for reuse. Saved views survive browser restarts and can be deleted without altering books.
+- Search with a free-text input, clear the active query, and filter all results with server-side pagination.
+
+**Library:** advanced filters, hidden/all visibility, adjustable page size, and grid/list display. **Reading Review:** advanced conditions combine with the active reading-status tab. **Series:** filters on number of books, progress percentage, read/unread totals, missing volume numbers, descriptions, and cover availability. **Quick Sort:** advanced conditions refine the chosen group (series, folder, author, or all) and can override the default order; random order remains available when no explicit multi-sort is set. **Metadata Review:** filter individual suggestions by confidence, field, author, title, series, and explanatory reason. **Individual series:** filter and reorder the member list without changing series assignments. **Custom exports:** reuse the same advanced rules and sorting to export matching records (including an empty CSV with headers when no books match).
+
+The new JSON APIs are:
+
+- `GET /api/query/metadata` — fields, valid operators, sorting support, and catalog-derived suggestions.
+- `POST /api/query/books` — filtered, sorted, paginated books (1–200 per page).
+- `POST /api/query/series` — aggregate series filtering/sorting.
+- `POST /api/query/reviews` — pending metadata suggestions.
+- `POST /api/query/quick-sort` — advanced Quick Sort batches (1–1000 at once).
+- `GET/POST /api/query/views`, `DELETE /api/query/views/{id}` — saved views.
+
+Example book query:
+
+```json
+{
+  "filters": {
+    "match": "all",
+    "rules": [
+      {"field": "folder", "op": "eq", "value": "D:/eBooks/Fantasy", "subfolders": true},
+      {"match": "any", "rules": [
+        {"field": "reading_status", "op": "eq", "value": "unanswered"},
+        {"field": "reading_status", "op": "eq", "value": "want_to_read"}
+      ]},
+      {"field": "pages", "op": "gte", "value": 250}
+    ]
+  },
+  "sort": [
+    {"field": "series", "direction": "asc"},
+    {"field": "series_index", "direction": "asc"},
+    {"field": "title", "direction": "asc"}
+  ],
+  "visibility": "visible",
+  "page": 1,
+  "per_page": 48
+}
+```
+
+All field names/operators are allowlisted, and values are bound as SQL parameters. The migration only adds a `saved_views` table and does not modify ebook files, titles, series, or reading records. Browsers remember **active unsaved queries** for their current tab session; named saved views persist in SQLite. Back up your SQLite database before upgrading.
+
+Rebuild the static site after changing `frontend/src/main.js`, `frontend/src/advanced.js`, or the CSS with `python build_frontend.py`. The included production bundle ships both JavaScript modules; Node.js is not required.
+
+Validation: `python -m pytest -q` (38 tests passing), `node --check` for both JavaScript modules, and Python syntax compilation. Automated full-browser validation was not possible in this runtime because Chromium navigation and even local style injection were blocked by the execution environment; visual/touch behavior should be verified on your own installation.
