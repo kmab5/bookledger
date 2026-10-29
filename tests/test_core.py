@@ -3,7 +3,7 @@ from pathlib import Path
 from xml.etree import ElementTree as ET
 from bookledger.core import connect, scan, parse_name
 from bookledger.export import export_csv,export_json
-from bookledger.webapp import create_app
+from bookledger.legacy_webapp import create_app
 from fastapi.testclient import TestClient
 
 def epub_file(path):

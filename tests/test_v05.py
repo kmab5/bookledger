@@ -1,7 +1,7 @@
 import zipfile
 from fastapi.testclient import TestClient
 from bookledger.core import connect,scan,enrich_existing,EXTRACTOR_VERSION
-from bookledger.webapp import create_app
+from bookledger.legacy_webapp import create_app
 
 def test_enrich_missing_fields_no_crash(tmp_path,monkeypatch):
     import bookledger.core as core

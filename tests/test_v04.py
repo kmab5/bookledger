@@ -3,7 +3,7 @@ from pathlib import Path
 from PIL import Image
 from fastapi.testclient import TestClient
 from bookledger.core import connect,scan
-from bookledger.webapp import create_app
+from bookledger.legacy_webapp import create_app
 from bookledger.custom_export import export_custom
 
 def test_cover_folder_export_and_routes(tmp_path):

@@ -1,6 +1,6 @@
 from fastapi.testclient import TestClient
 from bookledger.core import connect, enrich_existing
-from bookledger.webapp import create_app
+from bookledger.legacy_webapp import create_app
 
 def test_quick_sort_and_delete_series(tmp_path):
     path=tmp_path/'library.sqlite'

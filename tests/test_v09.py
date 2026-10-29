@@ -1,6 +1,6 @@
 from fastapi.testclient import TestClient
 from bookledger.core import connect, now
-from bookledger.webapp import create_app
+from bookledger.legacy_webapp import create_app
 
 
 def test_v09_quick_hide_stats_and_context(tmp_path):

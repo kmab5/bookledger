@@ -1,4 +1,4 @@
-# bookledger v2.0
+# bookledger v2.5
 
 Local-first ebook metadata catalog. **Does not alter ebook files. No AI or login.**
 
@@ -66,7 +66,7 @@ python -m pytest tests/test_v2_api.py -q
 
 For backward-compatibility tests of the old renderer, import `create_app` from `bookledger.legacy_webapp` rather than the new `bookledger.webapp`. Old tests assert server-rendered HTML on `/`; those are intentionally different in v2 and are not valid assertions against the new SPA shell. The old Python scanning and export core remains unchanged.
 
-**Known limitations:** No full multi-device browser visual audit has been run yet. Long-running job state is in server memory, while metadata results persist in SQLite. Only records currently loaded on-screen can be selected with the bulk bar. Series matching and ebook extraction logic were not rewritten in this frontend migration.
+**Known limitations:** The interface was rendered with synthetic catalog data at desktop and phone viewport sizes in isolated Chromium and checked for runtime errors and horizontal overflow. A full end-to-end test against a browser accessing your actual local server has not been completed. Long-running job state is in server memory, while metadata results persist in SQLite. Only records currently loaded on-screen can be selected with the bulk bar. Series matching and ebook extraction logic were not rewritten in this frontend migration.
 
 ## v2.2: source locations and folder filtering
 
@@ -92,4 +92,24 @@ For developers: frontend source is under `frontend/src`, run `python build_front
 - Within a group queue, **sort entire group** can mark all matching books read, not read, or hidden, after confirmation. It uses batches of at most 1000 database updates. Group operations include already-classified visible books and all nested files if selected. Be careful: these actions overwrite existing reading statuses.
 - `/api/quick-sort/queue` and `/api/quick-sort/authors` expose the filtered queue and author selections. `/api/books/bulk` now supports `action: assign_series` and `series_name`.
 
-Note: This release was based on the archived v2.3 source. The repository's HEAD was verified as `9db124514377685e1da6f3b67697129587f5a55e`, and the current backend file blob matched the archive; the frontend blob differed. A full clone was unavailable because the runtime couldn't resolve github.com. Reconcile any newer remote frontend edits before applying this archive.
+The v2.4 note above is retained for historical context. **v2.5 is built from the latest source archive you uploaded**, not the earlier v2.3 archive.
+
+## v2.5 — full frontend design overhaul (2026-10-30)
+
+A comprehensive visual and interaction redesign built **directly from the source archive supplied by the user**. No Python database migrations or ebook-file modifications were introduced.
+
+- Shared kmab-aligned design tokens, dark surfaces, restrained purple accents, green/amber status semantics, Space Grotesk and Space Mono typography.
+- Navigation organized into collection, reading, insights, tools, and system sections; compact icon rail on medium screens and an accessible drawer on phones.
+- Cover-led book cards with status indicators, series labels, grid/list switching, expandable library filters, stronger empty states, and contextual actions.
+- Rebuilt series overview with search, sort by size/progress/ordering needs, progress cards, and discoverable per-series menus.
+- Reading review now has status tabs and pagination (no longer limited to a single fixed first 100 results); covers and one-click classifications remain available.
+- Quick Sort retains editable metadata and swipes, with an explicit progress indicator, responsive split layout, and keyboard controls.
+- Unified styling for book detail, stats, metadata review, scanning, enrichment, export templates and custom field selection, and settings.
+- Improved keyboard context-menu navigation, mobile drawer Escape behavior, visible focus rings, reduced-motion support, more resilient narrow layouts, and screen-reader labels on icon-only navigation.
+- The legacy HTML tests now explicitly target the retained `bookledger.legacy_webapp`; new SPA and API tests stay on `bookledger.webapp`.
+
+### Test and preview details
+
+Run `python -m pytest -q` for the complete Python test suite. All 32 tests passed for this release. `node --check frontend/src/main.js` passed. Isolated Chromium rendered the library, series, reading, statistics, settings, book details, and Quick Sort at 1440px and 390px widths with sample data; none showed JavaScript exceptions or horizontal overflow. Context-menu selection, exiting selection, filter expansion, and mobile drawer close were also interactively checked. This is not a guarantee that every device or browser is flawless: verify with your real library and local server.
+
+To rebuild without npm, run `python build_frontend.py`. The packaged `bookledger/frontend_dist` already contains the updated frontend.

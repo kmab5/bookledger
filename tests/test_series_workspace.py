@@ -1,6 +1,6 @@
 from fastapi.testclient import TestClient
 from bookledger.core import connect
-from bookledger.webapp import create_app
+from bookledger.legacy_webapp import create_app
 
 def test_series_workspace_edit_add_remove(tmp_path):
     path=tmp_path/'library.db'

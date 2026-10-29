@@ -1,7 +1,7 @@
 from pathlib import Path
 from fastapi.testclient import TestClient
 from bookledger.core import connect
-from bookledger.webapp import create_app
+from bookledger.legacy_webapp import create_app
 
 
 def test_context_menu_asset_and_layout(tmp_path):

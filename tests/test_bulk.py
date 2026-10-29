@@ -1,6 +1,6 @@
 from fastapi.testclient import TestClient
 from bookledger.core import connect, now
-from bookledger.webapp import create_app
+from bookledger.legacy_webapp import create_app
 
 
 def test_bulk_book_operations_and_reading_covers(tmp_path):

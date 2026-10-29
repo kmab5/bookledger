@@ -3,7 +3,7 @@ import time
 from pathlib import Path
 from fastapi.testclient import TestClient
 from bookledger.core import connect,scan
-from bookledger.webapp import create_app
+from bookledger.legacy_webapp import create_app
 
 def test_progress_events(tmp_path):
     library=tmp_path/'library';library.mkdir();(library/'A Novel.txt').write_text('book')

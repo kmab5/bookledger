@@ -1,7 +1,7 @@
 import io, zipfile
 from fastapi.testclient import TestClient
 from bookledger.core import connect, scan, cache_cover
-from bookledger.webapp import create_app
+from bookledger.legacy_webapp import create_app
 
 def test_hidden_books_filter_and_toggle(tmp_path):
     with connect(tmp_path/'db.sqlite') as db:
