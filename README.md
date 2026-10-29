@@ -67,3 +67,7 @@ python -m pytest tests/test_v2_api.py -q
 For backward-compatibility tests of the old renderer, import `create_app` from `bookledger.legacy_webapp` rather than the new `bookledger.webapp`. Old tests assert server-rendered HTML on `/`; those are intentionally different in v2 and are not valid assertions against the new SPA shell. The old Python scanning and export core remains unchanged.
 
 **Known limitations:** No full multi-device browser visual audit has been run yet. Long-running job state is in server memory, while metadata results persist in SQLite. Only records currently loaded on-screen can be selected with the bulk bar. Series matching and ebook extraction logic were not rewritten in this frontend migration.
+
+## v2.2: source locations and folder filtering
+
+Book details and Quick Sort now show all indexed source file paths (read-only, including missing-file warnings). The Library's **source folder** filter lists directories from indexed paths and also matches nested subfolders. This is based on metadata already stored in SQLite and requires no rescan or migration. Run `python build_frontend.py` after editing the frontend; the packaged `frontend_dist` is already synced.

@@ -22,3 +22,6 @@
 .quick-editor-actions .muted{font-size:.78rem}
 @media(max-width:900px){.quick-layout{grid-template-columns:minmax(0,1fr)}.quick-card{position:static}.quick-card .book-cover{height:min(45dvh,380px)}}
 @media(max-width:550px){.quick-fields{grid-template-columns:1fr}.quick-fields .wide{grid-column:auto}.quick-editor-head{flex-direction:column}.quick-card .book-cover{height:280px}}
+
+/* source paths */
+.file-location{display:flex;align-items:flex-start;gap:.7rem;flex-wrap:wrap;padding:.7rem .85rem;margin:.5rem 0;border:1px solid var(--line,#2a2a31);border-radius:10px;background:var(--surface,#17171b)}.file-location code{font-family:var(--font-mono,monospace);font-size:.8rem;overflow-wrap:anywhere;word-break:break-word;min-width:0;flex:1 1 220px}.file-location small{color:var(--muted,#9a9aa6)}.quick-locations{grid-column:1/-1;margin:1rem 0}.quick-locations h3{margin:0 0 .4rem}

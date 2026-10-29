@@ -95,12 +95,16 @@ def create_app(db_path):
     @app.get('/api/health')
     def health(): return {'ok':True,'version':'2.0'}
     @app.get('/api/books')
-    def books(q:str='', status:str='', series:str='', category:str='', visibility:str='visible',sort:str='title', page:int=Query(1,ge=1), per_page:int=Query(48,ge=1,le=200)):
+    def books(q:str='', status:str='', series:str='', category:str='', folder:str='', visibility:str='visible',sort:str='title', page:int=Query(1,ge=1), per_page:int=Query(48,ge=1,le=200)):
         wh=['1=1']; args=[]
         if q:wh.append('(b.title LIKE ? OR b.authors LIKE ? OR COALESCE(b.series,\'\') LIKE ?)');args += [f'%{q}%']*3
         if status:wh.append("COALESCE(r.status,'unanswered')=?");args.append(status)
         if series:wh.append('b.series=?');args.append(series)
         if category:wh.append('EXISTS(SELECT 1 FROM book_categories bc JOIN categories cat ON cat.id=bc.category_id WHERE bc.book_id=b.id AND cat.name=?)');args.append(category)
+        if folder:
+            normalized=folder.rstrip('/\\').replace('\\','/')
+            wh.append("EXISTS (SELECT 1 FROM files f WHERE f.book_id=b.id AND SUBSTR(REPLACE(f.path, CHAR(92), '/'), 1, LENGTH(?)+1) = ?)")
+            args += [normalized, normalized+'/']
         if visibility=='visible':wh.append('b.hidden=0')
         elif visibility=='hidden':wh.append('b.hidden=1')
         elif visibility!='all':raise HTTPException(422,'Invalid visibility')
@@ -270,7 +274,9 @@ def create_app(db_path):
     def options():
         with db() as c:
             cats=[x[0] for x in c.execute('SELECT name FROM categories ORDER BY name')]
-        return {'statuses':sorted(STATES),'categories':cats,'fields':FIELDS,'templates':list(TEMPLATES)}
+            file_paths=[x[0] for x in c.execute('SELECT DISTINCT path FROM files WHERE path IS NOT NULL')]
+            folders=sorted({str(Path(path.replace(chr(92), '/')).parent) for path in file_paths if '/' in path.replace(chr(92), '/')},key=str.casefold)
+        return {'statuses':sorted(STATES),'categories':cats,'folders':folders,'fields':FIELDS,'templates':list(TEMPLATES)}
     @app.get('/api/cover/{book_id}')
     def cover(book_id:int):
         with db() as c:b=c.execute('SELECT cover_path FROM books WHERE id=?',(book_id,)).fetchone()
