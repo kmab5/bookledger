@@ -79,7 +79,7 @@ def create_app(db_path):
         const esc=x=>String(x??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
         async function refresh(){try{const r=await fetch('/scan/status',{cache:'no-store'});if(!r.ok)throw Error('Status request failed');const j=await r.json();
         if(j.status==='idle'){target.textContent='No scan started yet.';return}
-        const counts=j.counts||{};const lines=(j.events||[]).map(e=>esc(e)).join('\\n');
+        const counts=j.counts||{};const lines=(j.events||[]).map(e=>esc(e)).join('\n');
         target.innerHTML='<p><strong>'+esc(j.status)+'</strong> · '+esc(j.folder)+'</p><p>'+esc(j.processed||0)+' files encountered · '+esc(counts.new||0)+' new · '+esc(counts.updated||0)+' updated · '+esc(counts.unchanged||0)+' unchanged · '+esc(counts.errors||0)+' errors</p><p>Current: '+esc(j.current||'—')+'</p><p>Stage: '+esc(j.stage||'—')+'</p>'+(j.error?'<p>'+esc(j.error)+'</p>':'')+'<pre id="scan-log" role="log" aria-label="scan event log" style="max-height:350px;overflow:auto">'+lines+'</pre>';const log=document.getElementById('scan-log');if(log)log.scrollTop=log.scrollHeight;
         }catch(e){target.textContent=e.message}}
         refresh();setInterval(refresh,1500);

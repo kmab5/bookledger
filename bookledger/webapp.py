@@ -26,6 +26,18 @@ class BookUpdate(BaseModel):
     notes: str | None = None
     series: str | None = None
     series_index: float | None = None
+    title: str | None = Field(default=None, min_length=1, max_length=500)
+    subtitle: str | None = None
+    authors: list[str] | None = None
+    isbn10: str | None = None
+    isbn13: str | None = None
+    language: str | None = None
+    publisher: str | None = None
+    published: str | None = None
+    description: str | None = None
+    page_count: int | None = Field(default=None, ge=0)
+    word_count: int | None = Field(default=None, ge=0)
+    cover_url: str | None = None
 
 class BulkRequest(BaseModel):
     ids: list[int] = Field(min_length=1, max_length=10000)
@@ -117,7 +129,12 @@ def create_app(db_path):
         with db() as c:
             exists(c,book_id)
             if 'status' in values: status_update(c,book_id,values.pop('status'))
-            bk={k:values.pop(k) for k in list(values) if k in ('hidden','series','series_index')}
+            bk={k:values.pop(k) for k in list(values) if k in (
+                'hidden','series','series_index','title','subtitle','authors','isbn10','isbn13',
+                'language','publisher','published','description','page_count','word_count','cover_url')}
+            if 'title' in bk: bk['title']=bk['title'].strip()
+            if 'title' in bk and not bk['title']: raise HTTPException(422,'Title cannot be empty')
+            if 'authors' in bk: bk['authors']=json.dumps([a.strip() for a in bk['authors'] if a.strip()],ensure_ascii=False) if bk['authors'] is not None else '[]'
             if bk:
                 c.execute('UPDATE books SET '+','.join(f'{k}=?' for k in bk)+',updated_at=? WHERE id=?',[*bk.values(),now(),book_id])
                 if bk.get('series'):
