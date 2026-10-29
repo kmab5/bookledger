@@ -15,6 +15,35 @@ from .legacy_webapp import create_app as legacy_app
 ROOT = Path(__file__).parent
 STATES = {'unanswered','not_read','want_to_read','reading','finished','abandoned','on_hold','rereading'}
 
+# Database-backed, validated preferences; unknown keys are rejected.
+SETTING_SCHEMA = {
+    'library.include_subfolders': ('bool', True),
+    'library.default_visibility': ('choice', 'visible', ['visible','hidden','all']),
+    'library.default_sort': ('choice', 'title', ['title','author','recent','series']),
+    'library.page_size': ('int', 48, 12, 200),
+    'library.show_covers': ('bool', True),
+    'library.show_status_badges': ('bool', True),
+    'library.card_density': ('choice', 'comfortable', ['compact','comfortable','spacious']),
+    'reading.default_queue': ('choice','unanswered',['unanswered','all']),
+    'reading.show_covers': ('bool', True),
+    'quick_sort.include_classified': ('bool', False),
+    'quick_sort.show_metadata': ('bool', True),
+    'scan.online_by_default': ('bool', True),
+    'enrich.default_mode': ('choice','missing',['missing','covers','all']),
+    'enrich.batch_size': ('int', 100, 1, 10000),
+    'exports.default_format': ('choice','json',['json','goodreads','storygraph']),
+}
+def setting_defaults(): return {key: spec[1] for key,spec in SETTING_SCHEMA.items()}
+def validate_setting(key, value):
+    spec=SETTING_SCHEMA.get(key)
+    if spec is None: raise HTTPException(422, f'Unknown setting: {key}')
+    if spec[0]=='bool':
+        if type(value) is not bool: raise HTTPException(422, f'{key} must be boolean')
+    elif spec[0]=='int':
+        if type(value) is not int or not spec[2]<=value<=spec[3]: raise HTTPException(422, f'{key} out of range')
+    elif spec[0]=='choice' and value not in spec[2]: raise HTTPException(422, f'Invalid choice for {key}')
+    return value
+
 class BookUpdate(BaseModel):
     status: str | None = None
     hidden: bool | None = None
@@ -78,8 +107,34 @@ def create_app(db_path):
     app = FastAPI(title='BookLedger API', version='2.0')
     location = Path(db_path).expanduser()
     location.parent.mkdir(parents=True, exist_ok=True)
-    with connect(location): pass
+    with connect(location) as con:
+        con.execute("CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, value_json TEXT NOT NULL)")
+        con.commit()
     def db(): return connect(location)
+    def read_settings(c):
+        result=setting_defaults()
+        for r in c.execute('SELECT key,value_json FROM app_settings'):
+            try:
+                result[r['key']]=validate_setting(r['key'], json.loads(r['value_json']))
+            except (HTTPException,ValueError,TypeError): pass
+        return result
+    @app.get('/api/settings')
+    def get_settings():
+        with db() as c: return {'values':read_settings(c), 'defaults':setting_defaults()}
+    @app.patch('/api/settings')
+    def patch_settings(values:dict[str,object]):
+        if not isinstance(values,dict): raise HTTPException(422,'Expected object')
+        validated={k:validate_setting(k,v) for k,v in values.items()}
+        with db() as c:
+            for key,value in validated.items():
+                c.execute('INSERT INTO app_settings(key,value_json) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value_json=excluded.value_json',(key,json.dumps(value)))
+            c.commit()
+            return {'values':read_settings(c)}
+    @app.post('/api/settings/reset')
+    def reset_settings():
+        with db() as c:
+            c.execute('DELETE FROM app_settings');c.commit()
+        return {'values':setting_defaults()}
     def row(r):
         if r is None: return None
         d=dict(r)
@@ -95,7 +150,12 @@ def create_app(db_path):
     @app.get('/api/health')
     def health(): return {'ok':True,'version':'2.0'}
     @app.get('/api/books')
-    def books(q:str='', status:str='', series:str='', category:str='', folder:str='', visibility:str='visible',sort:str='title', page:int=Query(1,ge=1), per_page:int=Query(48,ge=1,le=200)):
+    def books(q:str='', status:str='', series:str='', category:str='', folder:str='', visibility:str='',sort:str='', include_subfolders:bool|None=None, page:int=Query(1,ge=1), per_page:int|None=Query(None,ge=1,le=200)):
+        with db() as c: prefs=read_settings(c)
+        if include_subfolders is None: include_subfolders=prefs['library.include_subfolders']
+        visibility=visibility or prefs['library.default_visibility']
+        sort=sort or prefs['library.default_sort']
+        per_page=per_page or prefs['library.page_size']
         wh=['1=1']; args=[]
         if q:wh.append('(b.title LIKE ? OR b.authors LIKE ? OR COALESCE(b.series,\'\') LIKE ?)');args += [f'%{q}%']*3
         if status:wh.append("COALESCE(r.status,'unanswered')=?");args.append(status)
@@ -103,8 +163,12 @@ def create_app(db_path):
         if category:wh.append('EXISTS(SELECT 1 FROM book_categories bc JOIN categories cat ON cat.id=bc.category_id WHERE bc.book_id=b.id AND cat.name=?)');args.append(category)
         if folder:
             normalized=folder.rstrip('/\\').replace('\\','/')
-            wh.append("EXISTS (SELECT 1 FROM files f WHERE f.book_id=b.id AND SUBSTR(REPLACE(f.path, CHAR(92), '/'), 1, LENGTH(?)+1) = ?)")
-            args += [normalized, normalized+'/']
+            if include_subfolders:
+                wh.append("EXISTS (SELECT 1 FROM files f WHERE f.book_id=b.id AND SUBSTR(REPLACE(f.path, CHAR(92), '/'), 1, LENGTH(?)+1) = ?)")
+                args += [normalized, normalized+'/']
+            else:
+                wh.append("EXISTS (SELECT 1 FROM files f WHERE f.book_id=b.id AND SUBSTR(REPLACE(f.path, CHAR(92), '/'), 1, LENGTH(?)+1) = ? AND INSTR(SUBSTR(REPLACE(f.path, CHAR(92), '/'), LENGTH(?)+2), '/') = 0)")
+                args += [normalized,normalized+'/',normalized]
         if visibility=='visible':wh.append('b.hidden=0')
         elif visibility=='hidden':wh.append('b.hidden=1')
         elif visibility!='all':raise HTTPException(422,'Invalid visibility')

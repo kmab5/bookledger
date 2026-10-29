@@ -71,3 +71,16 @@ For backward-compatibility tests of the old renderer, import `create_app` from `
 ## v2.2: source locations and folder filtering
 
 Book details and Quick Sort now show all indexed source file paths (read-only, including missing-file warnings). The Library's **source folder** filter lists directories from indexed paths and also matches nested subfolders. This is based on metadata already stored in SQLite and requires no rescan or migration. Run `python build_frontend.py` after editing the frontend; the packaged `frontend_dist` is already synced.
+
+## Settings (v2.3)
+
+Open **`/settings`** from the sidebar to manage persisted application preferences. Settings live in the same SQLite database (`app_settings`) and are shared by browsers using that server. The migration is automatic; existing books, reading history, and folder records are preserved.
+
+- **Library:** nested-folder inclusion (on/off), default visibility, sort, page size, card density, cover visibility, status badges.
+- **Reading & Quick Sort:** review queue scope, thumbnail visibility, include previously classified books in Quick Sort, show/hide the Quick Sort metadata editor.
+- **Scanning & enrichment:** default online lookup, enrichment mode, batch size. These configure future jobs only, never trigger jobs automatically.
+- **Exports:** preferred ready-made export preset.
+
+The library filter offers an explicit **nested folders** override. When unchecked, `D:/eBooks/Fantasy` returns only files directly inside that directory; when checked, nested series folders are included. Settings can also be read/updated via `GET /api/settings`, `PATCH /api/settings`, and reset via `POST /api/settings/reset`. Unknown preferences or invalid values return HTTP 422; reset does not delete books.
+
+For developers: frontend source is under `frontend/src`, run `python build_frontend.py` to regenerate `bookledger/frontend_dist` without Node. The original v1 server-rendered HTML tests no longer target the v2 SPA; see `tests/test_settings.py` and the v2 API tests for the new behavior.
